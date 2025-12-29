@@ -10,14 +10,21 @@ class LLMStrategySelection(BaseModel):
     This ensures the LLM can only return predefined strategies and valid actions.
     """
     strategy_name: Literal[
-        "MovingAverageCrossover",
+        "TrendFollowing",
+        "MomentumRotation",
         "MeanReversion",
         "Breakout",
+        "VolatilityBreakout",
+        "RelativeStrength",
+        "SectorRotation",
+        "DualMomentum",
+        "MovingAverageEnvelope",
+        "BollingerBands",
+        # Legacy names (mapped in registry)
+        "MovingAverageCrossover",
         "Momentum",
-        "TrendFollowing",
         "VolumeProfile",
         "RSI_OversoldOverbought",
-        "BollingerBands",
         "SupportResistance",
         "ConsolidationBreakout"
     ] = Field(

@@ -13,21 +13,12 @@ from models.llm_schemas import LLMStrategySelection
 from utils.exceptions import AgentError, StrategyError
 from utils.retry import retry_with_backoff, RetryConfig
 from pydantic import ValidationError
+from core.strategies import STRATEGY_REGISTRY, BaseStrategy
 
 
 # Predefined strategy templates - Strategy Agent can only select from these
-AVAILABLE_STRATEGIES = [
-    "MovingAverageCrossover",
-    "MeanReversion",
-    "Breakout",
-    "Momentum",
-    "TrendFollowing",
-    "VolumeProfile",
-    "RSI_OversoldOverbought",
-    "BollingerBands",
-    "SupportResistance",
-    "ConsolidationBreakout"
-]
+# Map to concrete strategy classes
+AVAILABLE_STRATEGIES = list(STRATEGY_REGISTRY.keys())
 
 
 class StrategyAgent(BaseAgent):
@@ -222,8 +213,24 @@ class StrategyAgent(BaseAgent):
         Returns:
             Dictionary with selected strategy and reasoning
         """
-        # Prepare prompt for LLM
-        strategies_list = "\n".join([f"- {s}" for s in AVAILABLE_STRATEGIES])
+        # Prepare prompt for LLM with strategy descriptions
+        strategy_descriptions = {
+            "TrendFollowing": "Moving average crossover (MA50/MA200) - good for trending markets",
+            "MomentumRotation": "6-month momentum - good for strong directional moves",
+            "MeanReversion": "RSI-based mean reversion - good for ranging markets",
+            "Breakout": "Donchian channel breakouts - good for volatility expansion",
+            "VolatilityBreakout": "ATR-based breakouts - good for high volatility periods",
+            "RelativeStrength": "Performance vs benchmark - good for outperformance",
+            "SectorRotation": "Momentum ranking - good for sector trends",
+            "DualMomentum": "Absolute + relative momentum - good for confirmation",
+            "MovingAverageEnvelope": "MA envelope bands - good for mean reversion",
+            "BollingerBands": "Bollinger Bands reversion - good for overbought/oversold"
+        }
+        strategies_list = "\n".join([
+            f"- {name}: {desc}" 
+            for name, desc in strategy_descriptions.items()
+            if name in STRATEGY_REGISTRY
+        ])
         
         prompt = f"""You are a trading strategy selector. Analyze the market context and select the MOST APPROPRIATE strategy from the predefined list below.
 
@@ -351,6 +358,9 @@ IMPORTANT:
         """
         Generate a trading signal from strategy selection and market data.
         
+        This method uses the concrete strategy implementation to generate
+        the actual signal action deterministically.
+        
         Args:
             symbol: Stock symbol
             data: MarketData object
@@ -361,20 +371,40 @@ IMPORTANT:
             TradingSignal or None if signal should not be generated
         """
         try:
-            # Determine action
-            action_str = strategy_selection.get("action", "HOLD").upper()
-            action = SignalAction[action_str] if action_str in SignalAction.__members__ else SignalAction.HOLD
+            strategy_name = strategy_selection.get("strategy_name", "TrendFollowing")
+            
+            # Get strategy class from registry
+            strategy_class = STRATEGY_REGISTRY.get(strategy_name)
+            if not strategy_class:
+                self.log_warning(
+                    f"Strategy '{strategy_name}' not found in registry, using TrendFollowing"
+                )
+                strategy_class = STRATEGY_REGISTRY.get("TrendFollowing")
+            
+            # Instantiate strategy with config
+            strategy_config = self.config.__dict__.get("strategy_config", {})
+            strategy: BaseStrategy = strategy_class(config=strategy_config)
+            
+            # Generate signal using concrete strategy implementation
+            try:
+                action = strategy.generate_signal(data)
+            except ValueError as e:
+                # Insufficient data for strategy
+                self.log_warning(
+                    f"Strategy {strategy_name} failed for {symbol} due to insufficient data: {e}"
+                )
+                return None
             
             # Get current price
             current_price = context.get("current_price", 0.0)
             if current_price == 0.0 and data.bars:
                 current_price = data.bars[-1].close
             
-            # Generate signal
+            # Create trading signal with LLM confidence and reasoning
             signal = TradingSignal(
                 symbol=symbol,
                 action=action,
-                strategy_name=strategy_selection.get("strategy_name", "MovingAverageCrossover"),
+                strategy_name=strategy_name,
                 confidence=float(strategy_selection.get("confidence", 0.5)),
                 timestamp=datetime.now(),
                 price=current_price,
