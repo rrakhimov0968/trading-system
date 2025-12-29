@@ -9,6 +9,7 @@ import logging
 from config.settings import AppConfig
 from agents.data_agent import DataAgent
 from agents.execution_agent import ExecutionAgent
+from agents.strategy_agent import StrategyAgent
 from utils.exceptions import TradingSystemError
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class TradingSystemOrchestrator:
     
     Flow:
     1. DataAgent fetches market data
-    2. Strategy Agent evaluates data and generates signals (future)
+    2. Strategy Agent evaluates data and generates signals ✅
     3. Quant Agent analyzes signals (future)
     4. Risk Agent validates trades (future)
     5. Execution Agent executes approved trades (future)
@@ -42,9 +43,9 @@ class TradingSystemOrchestrator:
         logger.info("Initializing agents...")
         try:
             self.data_agent = DataAgent(config=config)
+            self.strategy_agent = StrategyAgent(config=config)
             self.execution_agent = ExecutionAgent(config=config)
             # TODO: Initialize other agents as they're implemented
-            # self.strategy_agent = StrategyAgent(config=config)
             # self.quant_agent = QuantAgent(config=config)
             # self.risk_agent = RiskAgent(config=config)
             # self.audit_agent = AuditAgent(config=config)
@@ -114,6 +115,7 @@ class TradingSystemOrchestrator:
         
         checks = {
             "DataAgent": self.data_agent.health_check(),
+            "StrategyAgent": self.strategy_agent.health_check(),
             "ExecutionAgent": self.execution_agent.health_check(),
         }
         
@@ -161,9 +163,19 @@ class TradingSystemOrchestrator:
                         f"latest close=${latest_bar.close:.2f}, volume={latest_bar.volume:,}"
                     )
             
-            # Step 2: Strategy Agent would evaluate data and generate signals
-            # TODO: Implement Strategy Agent
-            # signals = self.strategy_agent.process(market_data)
+            # Step 2: Strategy Agent evaluates data and generates signals
+            logger.info("Step 2: Evaluating market data and generating signals...")
+            signals = self.strategy_agent.process(market_data)
+            
+            if signals:
+                logger.info(f"Generated {len(signals)} trading signals")
+                for signal in signals:
+                    logger.info(
+                        f"  {signal.symbol}: {signal.action.value} using {signal.strategy_name} "
+                        f"(confidence: {signal.confidence:.2f}, price: ${signal.price:.2f})"
+                    )
+            else:
+                logger.info("No signals generated")
             
             # Step 3: Quant Agent would analyze signals
             # TODO: Implement Quant Agent
