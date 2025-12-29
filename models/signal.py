@@ -1,8 +1,9 @@
 """Trading signal models."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 from enum import Enum
+import pandas as pd
 
 
 class SignalAction(str, Enum):
@@ -28,6 +29,7 @@ class TradingSignal:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     reasoning: Optional[str] = None  # LLM reasoning for the signal
+    historical_data: Optional[pd.DataFrame] = field(default=None, repr=False)  # Historical data for validation
     
     def to_dict(self) -> dict:
         """Convert signal to dictionary."""

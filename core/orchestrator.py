@@ -10,6 +10,7 @@ from config.settings import AppConfig
 from agents.data_agent import DataAgent
 from agents.execution_agent import ExecutionAgent
 from agents.strategy_agent import StrategyAgent
+from agents.quant_agent import QuantAgent
 from utils.exceptions import TradingSystemError
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ class TradingSystemOrchestrator:
     Flow:
     1. DataAgent fetches market data
     2. Strategy Agent evaluates data and generates signals ✅
-    3. Quant Agent analyzes signals (future)
+    3. Quant Agent validates signals and adjusts confidence ✅
     4. Risk Agent validates trades (future)
     5. Execution Agent executes approved trades (future)
     6. Audit Agent logs and reports (future)
@@ -44,9 +45,9 @@ class TradingSystemOrchestrator:
         try:
             self.data_agent = DataAgent(config=config)
             self.strategy_agent = StrategyAgent(config=config)
+            self.quant_agent = QuantAgent(config=config)
             self.execution_agent = ExecutionAgent(config=config)
             # TODO: Initialize other agents as they're implemented
-            # self.quant_agent = QuantAgent(config=config)
             # self.risk_agent = RiskAgent(config=config)
             # self.audit_agent = AuditAgent(config=config)
             
@@ -116,6 +117,7 @@ class TradingSystemOrchestrator:
         checks = {
             "DataAgent": self.data_agent.health_check(),
             "StrategyAgent": self.strategy_agent.health_check(),
+            "QuantAgent": self.quant_agent.health_check(),
             "ExecutionAgent": self.execution_agent.health_check(),
         }
         
@@ -187,13 +189,26 @@ class TradingSystemOrchestrator:
             else:
                 logger.info("No signals generated")
             
-            # Step 3: Quant Agent would analyze signals
-            # TODO: Implement Quant Agent
-            # try:
-            #     analysis = self.quant_agent.process(signals)
-            # except Exception as e:
-            #     logger.error(f"QuantAgent failed: {e}", exc_info=True)
-            #     analysis = None
+            # Step 3: Quant Agent validates signals and adjusts confidence
+            if signals:
+                logger.info("Step 3: Validating signals with quantitative analysis...")
+                try:
+                    validated_signals = self.quant_agent.process(signals, market_data)
+                    
+                    # Log confidence adjustments
+                    for original, validated in zip(signals, validated_signals):
+                        if original.confidence != validated.confidence:
+                            logger.info(
+                                f"  {validated.symbol}: Confidence adjusted "
+                                f"{original.confidence:.2f} → {validated.confidence:.2f}"
+                            )
+                    
+                    signals = validated_signals
+                    logger.info(f"Quantitative validation completed: {len(signals)} signals validated")
+                except Exception as e:
+                    logger.error(f"QuantAgent failed: {e}", exc_info=True)
+                    logger.warning("Continuing with unvalidated signals due to QuantAgent failure")
+                    # Continue with original signals
             
             # Step 4: Risk Agent would validate trades
             # TODO: Implement Risk Agent

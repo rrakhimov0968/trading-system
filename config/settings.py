@@ -195,6 +195,11 @@ class AppConfig:
     # Orchestration settings
     loop_interval_seconds: int = 60  # How often to run the main loop
     symbols: List[str] = None  # Symbols to monitor
+    # Quant agent settings
+    quant_min_sharpe: float = 1.5  # Minimum Sharpe ratio threshold
+    quant_max_drawdown: float = 0.08  # Maximum drawdown threshold (8%)
+    quant_max_vif: float = 10.0  # Maximum VIF for multicollinearity check
+    quant_use_llm: bool = False  # Enable LLM review for quant analysis
     
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -227,7 +232,11 @@ class AppConfig:
             database=DatabaseConfig.from_env(),
             data_provider=data_provider,
             loop_interval_seconds=int(os.getenv("LOOP_INTERVAL_SECONDS", "60")),
-            symbols=symbols
+            symbols=symbols,
+            quant_min_sharpe=float(os.getenv("QUANT_MIN_SHARPE", "1.5")),
+            quant_max_drawdown=float(os.getenv("QUANT_MAX_DRAWDOWN", "0.08")),
+            quant_max_vif=float(os.getenv("QUANT_MAX_VIF", "10.0")),
+            quant_use_llm=os.getenv("QUANT_USE_LLM", "false").lower() == "true"
         )
 
 
