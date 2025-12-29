@@ -4,10 +4,12 @@ from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import pandas as pd
 import json
+from pydantic import ValidationError
 
 from agents.strategy_agent import StrategyAgent, AVAILABLE_STRATEGIES
 from models.market_data import MarketData, Bar
 from models.signal import TradingSignal, SignalAction
+from models.llm_schemas import LLMStrategySelection
 from utils.exceptions import AgentError, StrategyError
 from tests.conftest import mock_config
 
@@ -135,13 +137,14 @@ class TestStrategySelection:
     
     @patch('agents.strategy_agent.Groq')
     def test_select_strategy_invalid_strategy_name(self, mock_groq_class, mock_config):
-        """Test handling of invalid strategy name from LLM."""
+        """Test handling of invalid strategy name from LLM (now validated by Pydantic)."""
         from config.settings import LLMConfig
         
         mock_config.groq = LLMConfig(provider="groq", api_key="test")
         
         mock_completion = Mock()
         mock_completion.choices = [Mock()]
+        # LLM returns invalid strategy name
         mock_completion.choices[0].message.content = json.dumps({
             "strategy_name": "InvalidStrategy",
             "action": "BUY",
@@ -156,10 +159,12 @@ class TestStrategySelection:
         agent = StrategyAgent(config=mock_config)
         context = {"symbol": "AAPL"}
         
+        # Pydantic validation should catch this and return safe default
         result = agent._select_strategy_with_llm("AAPL", context)
         
-        # Should default to MovingAverageCrossover
+        # Should default to MovingAverageCrossover due to validation failure
         assert result["strategy_name"] == "MovingAverageCrossover"
+        assert result["action"] == "HOLD"
     
     @patch('agents.strategy_agent.Groq')
     def test_select_strategy_llm_failure(self, mock_groq_class, mock_config):

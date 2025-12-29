@@ -9,8 +9,10 @@ from groq import Groq
 from agents.base import BaseAgent
 from models.market_data import MarketData
 from models.signal import TradingSignal, SignalAction
+from models.llm_schemas import LLMStrategySelection
 from utils.exceptions import AgentError, StrategyError
 from utils.retry import retry_with_backoff, RetryConfig
+from pydantic import ValidationError
 
 
 # Predefined strategy templates - Strategy Agent can only select from these
@@ -283,31 +285,52 @@ IMPORTANT:
             response_text = completion.choices[0].message.content
             self.log_debug(f"LLM response for {symbol}", response=response_text)
             
-            # Parse JSON response
-            result = json.loads(response_text)
-            
-            # Validate strategy name is in available list
-            strategy_name = result.get("strategy_name", "")
-            if strategy_name not in AVAILABLE_STRATEGIES:
-                self.log_warning(
-                    f"LLM selected invalid strategy '{strategy_name}' for {symbol}, "
-                    f"defaulting to 'MovingAverageCrossover'"
+            # Parse and validate JSON response using Pydantic schema
+            try:
+                # Parse JSON first
+                json_data = json.loads(response_text)
+                
+                # Validate against Pydantic schema (ensures strategy is from predefined list)
+                validated_response = LLMStrategySelection(**json_data)
+                
+                # Convert Pydantic model to dict for compatibility
+                result = {
+                    "strategy_name": validated_response.strategy_name,
+                    "action": validated_response.action,
+                    "confidence": validated_response.confidence,
+                    "reasoning": validated_response.reasoning
+                }
+                
+                self.log_debug(f"Validated LLM response for {symbol}", result=result)
+                return result
+                
+            except json.JSONDecodeError as e:
+                self.log_error(f"Invalid JSON in LLM response for {symbol}: {e}")
+                # Raise as ValueError to be caught by outer handler
+                raise ValueError(f"Failed to parse JSON response: {e}") from e
+            except ValidationError as e:
+                # Log validation errors with details for debugging
+                self.log_error(
+                    f"LLM response validation failed for {symbol}. "
+                    f"Strategy or action not in allowed list. "
+                    f"Errors: {e.errors()}, Raw response: {response_text[:200]}"
                 )
-                result["strategy_name"] = "MovingAverageCrossover"
+                # Re-raise to be caught by outer handler
+                raise
             
-            # Validate action
-            action = result.get("action", "HOLD").upper()
-            if action not in ["BUY", "SELL", "HOLD"]:
-                self.log_warning(f"Invalid action '{action}' for {symbol}, defaulting to HOLD")
-                result["action"] = "HOLD"
-            
-            # Validate confidence
-            confidence = float(result.get("confidence", 0.5))
-            confidence = max(0.0, min(1.0, confidence))  # Clamp between 0 and 1
-            result["confidence"] = confidence
-            
-            return result
-            
+        except (ValidationError, ValueError) as e:
+            # Schema validation failed - LLM returned invalid strategy/action
+            self.log_error(
+                f"LLM validation failed for {symbol}: {e}. "
+                f"Using safe default strategy."
+            )
+            # Fallback to safe default strategy
+            return {
+                "strategy_name": "MovingAverageCrossover",
+                "action": "HOLD",
+                "confidence": 0.3,
+                "reasoning": f"LLM validation failed - strategy not in allowed list. Using safe default."
+            }
         except Exception as e:
             self.log_exception(f"LLM strategy selection failed for {symbol}", e)
             # Fallback to default strategy

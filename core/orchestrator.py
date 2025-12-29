@@ -142,11 +142,16 @@ class TradingSystemOrchestrator:
         try:
             # Step 1: Fetch market data
             logger.info("Step 1: Fetching market data...")
-            market_data = self.data_agent.process(
-                symbols=self.config.symbols,
-                timeframe="1Day",
-                limit=100
-            )
+            try:
+                market_data = self.data_agent.process(
+                    symbols=self.config.symbols,
+                    timeframe="1Day",
+                    limit=100
+                )
+            except Exception as e:
+                logger.error(f"DataAgent failed: {e}", exc_info=True)
+                logger.warning("Skipping iteration due to data fetch failure")
+                return
             
             if not market_data:
                 logger.warning("No market data received, skipping iteration")
@@ -165,7 +170,12 @@ class TradingSystemOrchestrator:
             
             # Step 2: Strategy Agent evaluates data and generates signals
             logger.info("Step 2: Evaluating market data and generating signals...")
-            signals = self.strategy_agent.process(market_data)
+            try:
+                signals = self.strategy_agent.process(market_data)
+            except Exception as e:
+                logger.error(f"StrategyAgent failed: {e}", exc_info=True)
+                logger.warning("Continuing iteration with empty signals due to StrategyAgent failure")
+                signals = []
             
             if signals:
                 logger.info(f"Generated {len(signals)} trading signals")
@@ -179,20 +189,35 @@ class TradingSystemOrchestrator:
             
             # Step 3: Quant Agent would analyze signals
             # TODO: Implement Quant Agent
-            # analysis = self.quant_agent.process(signals)
+            # try:
+            #     analysis = self.quant_agent.process(signals)
+            # except Exception as e:
+            #     logger.error(f"QuantAgent failed: {e}", exc_info=True)
+            #     analysis = None
             
             # Step 4: Risk Agent would validate trades
             # TODO: Implement Risk Agent
-            # approved_trades = self.risk_agent.process(analysis)
+            # try:
+            #     approved_trades = self.risk_agent.process(analysis)
+            # except Exception as e:
+            #     logger.error(f"RiskAgent failed: {e}", exc_info=True)
+            #     approved_trades = []
             
             # Step 5: Execution Agent would execute approved trades
             # TODO: Implement full execution flow
             # for trade in approved_trades:
-            #     self.execution_agent.process(trade)
+            #     try:
+            #         self.execution_agent.process(trade)
+            #     except Exception as e:
+            #         logger.error(f"ExecutionAgent failed for trade {trade}: {e}", exc_info=True)
+            #         # Continue with next trade
             
             # Step 6: Audit Agent would log and report
             # TODO: Implement Audit Agent
-            # self.audit_agent.process(iteration_results)
+            # try:
+            #     self.audit_agent.process(iteration_results)
+            # except Exception as e:
+            #     logger.error(f"AuditAgent failed: {e}", exc_info=True)
             
             iteration_duration = (datetime.now() - iteration_start).total_seconds()
             logger.info(f"Iteration {self.iteration} completed in {iteration_duration:.2f} seconds")
