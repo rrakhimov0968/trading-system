@@ -2,7 +2,7 @@
 import sys
 from utils.logging import setup_logging
 from config.settings import get_config
-from agents.execution_agent import ExecutionAgent
+from core.orchestrator import TradingSystemOrchestrator
 from utils.exceptions import TradingSystemError
 
 # Setup logging first (before other imports that may log)
@@ -23,28 +23,13 @@ def main() -> None:
         config = get_config()
         logger.info(
             f"Configuration loaded: mode={config.trading_mode.value}, "
-            f"log_level={config.log_level.value}"
+            f"log_level={config.log_level.value}, "
+            f"data_provider={config.data_provider.provider.value if config.data_provider else 'None'}"
         )
         
-        # Initialize agents
-        execution_agent = ExecutionAgent(config=config)
-        
-        # Health check
-        health = execution_agent.health_check()
-        logger.info(f"ExecutionAgent health: {health['status']}")
-        
-        if health["status"] != "healthy":
-            logger.error(f"ExecutionAgent is unhealthy: {health}")
-            sys.exit(1)
-        
-        # Get account info (example operation)
-        account = execution_agent.get_account()
-        logger.info(
-            f"Account Balance: ${account.cash}, "
-            f"Buying Power: ${account.buying_power}"
-        )
-        
-        logger.info("Trading System Ready")
+        # Create and start orchestrator
+        orchestrator = TradingSystemOrchestrator(config=config)
+        orchestrator.start()
         
     except TradingSystemError as e:
         logger.error(
@@ -52,6 +37,9 @@ def main() -> None:
             extra={"correlation_id": e.correlation_id, "details": e.details}
         )
         sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested by user")
+        sys.exit(0)
     except Exception as e:
         logger.exception("Unexpected error starting trading system")
         sys.exit(1)

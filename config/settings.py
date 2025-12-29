@@ -2,7 +2,7 @@
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 
 # Load environment variables once at module level
@@ -125,6 +125,61 @@ class DatabaseConfig:
         )
 
 
+class DataProvider(str, Enum):
+    """Data provider options."""
+    ALPACA = "alpaca"
+    POLYGON = "polygon"
+    YAHOO = "yahoo"  # yfinance
+
+
+@dataclass
+class DataProviderConfig:
+    """Data provider configuration."""
+    provider: DataProvider
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    rate_limit_per_minute: int = 200  # Default rate limit
+    cache_ttl_seconds: int = 60  # Cache TTL in seconds
+    
+    @classmethod
+    def alpaca_from_env(cls) -> Optional["DataProviderConfig"]:
+        """Load Alpaca data config from environment."""
+        # Reuse Alpaca trading credentials if available
+        api_key = os.getenv("ALPACA_API_KEY")
+        if not api_key:
+            return None
+        return cls(
+            provider=DataProvider.ALPACA,
+            api_key=api_key,
+            base_url=os.getenv("ALPACA_DATA_BASE_URL"),
+            rate_limit_per_minute=int(os.getenv("ALPACA_DATA_RATE_LIMIT", "200")),
+            cache_ttl_seconds=int(os.getenv("ALPACA_DATA_CACHE_TTL", "60"))
+        )
+    
+    @classmethod
+    def polygon_from_env(cls) -> Optional["DataProviderConfig"]:
+        """Load Polygon config from environment."""
+        api_key = os.getenv("POLYGON_API_KEY")
+        if not api_key:
+            return None
+        return cls(
+            provider=DataProvider.POLYGON,
+            api_key=api_key,
+            base_url=os.getenv("POLYGON_BASE_URL", "https://api.polygon.io"),
+            rate_limit_per_minute=int(os.getenv("POLYGON_RATE_LIMIT", "5")),  # Free tier limit
+            cache_ttl_seconds=int(os.getenv("POLYGON_CACHE_TTL", "60"))
+        )
+    
+    @classmethod
+    def yahoo_from_env(cls) -> "DataProviderConfig":
+        """Load Yahoo Finance config (no API key needed)."""
+        return cls(
+            provider=DataProvider.YAHOO,
+            rate_limit_per_minute=int(os.getenv("YAHOO_RATE_LIMIT", "10")),  # Conservative
+            cache_ttl_seconds=int(os.getenv("YAHOO_CACHE_TTL", "300"))  # 5 minutes
+        )
+
+
 @dataclass
 class AppConfig:
     """Main application configuration."""
@@ -135,7 +190,11 @@ class AppConfig:
     anthropic: Optional[LLMConfig] = None
     groq: Optional[LLMConfig] = None
     database: Optional[DatabaseConfig] = None
+    data_provider: Optional[DataProviderConfig] = None
     correlation_id_header: str = "X-Correlation-ID"
+    # Orchestration settings
+    loop_interval_seconds: int = 60  # How often to run the main loop
+    symbols: List[str] = None  # Symbols to monitor
     
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -147,6 +206,17 @@ class AppConfig:
             os.getenv("LOG_LEVEL", "INFO").upper()
         )
         
+        # Determine data provider (priority: Polygon > Alpaca > Yahoo)
+        data_provider = (
+            DataProviderConfig.polygon_from_env() or
+            DataProviderConfig.alpaca_from_env() or
+            DataProviderConfig.yahoo_from_env()
+        )
+        
+        # Parse symbols list
+        symbols_str = os.getenv("SYMBOLS", "AAPL,MSFT,GOOGL")
+        symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
+        
         return cls(
             trading_mode=trading_mode,
             log_level=log_level,
@@ -154,7 +224,10 @@ class AppConfig:
             openai=LLMConfig.openai_from_env(),
             anthropic=LLMConfig.anthropic_from_env(),
             groq=LLMConfig.groq_from_env(),
-            database=DatabaseConfig.from_env()
+            database=DatabaseConfig.from_env(),
+            data_provider=data_provider,
+            loop_interval_seconds=int(os.getenv("LOOP_INTERVAL_SECONDS", "60")),
+            symbols=symbols
         )
 
 
