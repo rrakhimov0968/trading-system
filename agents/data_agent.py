@@ -235,20 +235,29 @@ class DataAgent(BaseAgent):
                 limit=limit
             )
             
-            self.log_debug(
+            self.log_info(
                 f"Alpaca API request for {symbol}: "
                 f"timeframe={alpaca_tf}, start={start_date}, end={end_date}, limit={limit}"
             )
             
             bars_response = self.alpaca_client.get_stock_bars(request_params)
             
-            # Debug: Log what Alpaca actually returned
-            self.log_debug(
-                f"Alpaca response for {symbol}: "
+            # Log what Alpaca actually returned (INFO level for visibility)
+            self.log_info(
+                f"Alpaca API response for {symbol}: "
                 f"type={type(bars_response)}, "
                 f"is_tuple={isinstance(bars_response, tuple)}, "
-                f"is_dict={isinstance(bars_response, dict)}"
+                f"is_dict={isinstance(bars_response, dict)}, "
+                f"hasattr_data={hasattr(bars_response, 'data') if bars_response else False}"
             )
+            
+            # Check if response is None or empty
+            if bars_response is None:
+                self.log_warning(f"Alpaca returned None for {symbol}")
+                raise AgentError(
+                    f"Alpaca API returned None for {symbol}",
+                    correlation_id=self._correlation_id
+                )
             
             # Convert to our Bar model
             bars = []
@@ -306,16 +315,43 @@ class DataAgent(BaseAgent):
                     response_data = None
             elif isinstance(bars_response, dict):
                 # Direct dict response
+                self.log_info(f"Alpaca response is direct dict for {symbol}")
                 response_data = bars_response
             else:
-                # Try to convert or access as dict
-                if hasattr(bars_response, '__dict__'):
+                # Try to convert or access as dict - Alpaca may return response object
+                self.log_info(f"Alpaca response is object type {type(bars_response)} for {symbol}, checking attributes...")
+                if hasattr(bars_response, 'data'):
+                    # Alpaca response object with .data attribute
+                    data_attr = bars_response.data
+                    self.log_info(f"Found .data attribute: type={type(data_attr)}, is_dict={isinstance(data_attr, dict)}")
+                    # .data might be the dict we need, or it might be another tuple
+                    if isinstance(data_attr, dict):
+                        response_data = data_attr
+                    elif isinstance(data_attr, tuple) and len(data_attr) >= 2:
+                        # Nested tuple: response.data = ('data', {...})
+                        response_data = data_attr[1]
+                        self.log_info(f"Extracted from nested tuple in .data attribute")
+                    else:
+                        self.log_warning(f"Unexpected .data format: {type(data_attr)}")
+                        response_data = None
+                elif hasattr(bars_response, '__dict__'):
                     response_data = bars_response.__dict__
-                elif hasattr(bars_response, 'data'):
-                    response_data = bars_response.data
+                    self.log_info(f"Using __dict__ for {symbol}")
                 else:
-                    self.log_warning(f"Unexpected response format: {type(bars_response)}")
-                    response_data = None
+                    self.log_warning(f"Unexpected response format for {symbol}: {type(bars_response)}, no .data or __dict__")
+                    # Try to see if it's iterable or has other attributes
+                    if hasattr(bars_response, '__iter__'):
+                        try:
+                            # Maybe it's an iterable of bars?
+                            bars_list = list(bars_response)
+                            self.log_info(f"Response is iterable, extracted {len(bars_list)} items")
+                            # Create a dict with symbol as key
+                            response_data = {symbol: bars_list}
+                        except Exception as e:
+                            self.log_warning(f"Failed to iterate response: {e}")
+                            response_data = None
+                    else:
+                        response_data = None
             
             # Extract bars from response data
             if response_data and isinstance(response_data, dict):
