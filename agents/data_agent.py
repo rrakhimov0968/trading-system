@@ -645,18 +645,22 @@ class DataAgent(BaseAgent):
     def __del__(self):
         """Cleanup async resources on deletion."""
         # Check if _async_session exists (may not be initialized)
-        if hasattr(self, '_async_session') and self._async_session and not self._async_session.closed:
-            # Try to close session synchronously (best effort)
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Can't close in running loop, schedule cleanup
-                    loop.create_task(self._async_session.close())
-                else:
-                    loop.run_until_complete(self._async_session.close())
-            except (RuntimeError, AttributeError):
-                # No event loop or session already closed
-                pass
+        try:
+            if hasattr(self, '_async_session') and self._async_session and not self._async_session.closed:
+                # Try to close session synchronously (best effort)
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Can't close in running loop, schedule cleanup
+                        loop.create_task(self._async_session.close())
+                    else:
+                        loop.run_until_complete(self._async_session.close())
+                except (RuntimeError, AttributeError):
+                    # No event loop or session already closed
+                    pass
+        except (AttributeError, RuntimeError):
+            # Object partially deleted or no event loop available
+            pass
     
     def __del__(self):
         """Cleanup async resources on deletion."""

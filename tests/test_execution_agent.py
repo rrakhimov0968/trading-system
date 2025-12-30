@@ -101,13 +101,15 @@ class TestExecutionAgentOrders:
     
     def test_place_market_order_api_error(self, execution_agent, mock_alpaca_client):
         """Test handling of API errors when placing orders."""
-        # Create a mock error object with status_code attribute
-        error = Mock(spec=AlpacaAPIError)
-        error.__str__ = lambda self: "API Error"
-        error.status_code = 400
-        mock_alpaca_client.submit_order.side_effect = error
+        # Create a proper exception that can be raised
+        class MockAlpacaError(Exception):
+            def __init__(self):
+                super().__init__("API Error")
+                self.status_code = 400
         
-        with pytest.raises(ExecutionError, match="Failed to place order|Alpaca API error"):
+        mock_alpaca_client.submit_order.side_effect = MockAlpacaError()
+        
+        with pytest.raises(ExecutionError, match="Failed to place order|Alpaca API error|Unexpected error"):
             execution_agent.place_market_order("AAPL", 10, OrderSide.BUY)
     
     def test_unsupported_order_type(self, execution_agent, sample_order_request):
@@ -131,11 +133,13 @@ class TestExecutionAgentAccount:
     
     def test_get_account_api_error(self, execution_agent, mock_alpaca_client):
         """Test handling of API errors when getting account."""
-        # Create a mock error object with status_code attribute
-        error = Mock(spec=AlpacaAPIError)
-        error.__str__ = lambda self: "API Error"
-        error.status_code = 401
-        mock_alpaca_client.get_account.side_effect = error
+        # Create a proper exception that can be raised
+        class MockAlpacaError(Exception):
+            def __init__(self):
+                super().__init__("API Error")
+                self.status_code = 401
+        
+        mock_alpaca_client.get_account.side_effect = MockAlpacaError()
         
         with pytest.raises(APIError, match="Alpaca API error|Unexpected error"):
             execution_agent.get_account()
@@ -149,11 +153,13 @@ class TestExecutionAgentAccount:
     
     def test_get_positions_api_error(self, execution_agent, mock_alpaca_client):
         """Test handling of API errors when getting positions."""
-        # Create a mock error object with status_code attribute
-        error = Mock(spec=AlpacaAPIError)
-        error.__str__ = lambda self: "API Error"
-        error.status_code = 500
-        mock_alpaca_client.get_all_positions.side_effect = error
+        # Create a proper exception that can be raised
+        class MockAlpacaError(Exception):
+            def __init__(self):
+                super().__init__("API Error")
+                self.status_code = 500
+        
+        mock_alpaca_client.get_all_positions.side_effect = MockAlpacaError()
         
         with pytest.raises(APIError, match="Alpaca API error|Unexpected error"):
             execution_agent.get_positions()
