@@ -54,15 +54,15 @@ def main() -> None:
             f"data_provider={config.data_provider.provider.value if config.data_provider else 'None'}"
         )
         
-        # Check if async mode is enabled
-        use_async = os.getenv("USE_ASYNC_ORCHESTRATOR", "false").lower() == "true"
+        # Check if async mode is enabled (default to true now)
+        use_async = os.getenv("USE_ASYNC_ORCHESTRATOR", "true").lower() == "true"
         
         if use_async:
-            logger.info("Using async event-driven orchestrator")
+            logger.info("Using async event-driven orchestrator (default)")
             orchestrator = AsyncTradingSystemOrchestrator(config=config)
             asyncio.run(orchestrator.start())
         else:
-            logger.info("Using synchronous orchestrator")
+            logger.info("Using synchronous orchestrator (USE_ASYNC_ORCHESTRATOR=false)")
             orchestrator = TradingSystemOrchestrator(config=config)
             orchestrator.start()
         

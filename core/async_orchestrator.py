@@ -18,6 +18,7 @@ from models.signal import TradingSignal, SignalAction
 from models.market_data import MarketData
 from utils.event_bus import EventBus
 from utils.exceptions import TradingSystemError
+from utils.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,27 @@ class AsyncTradingSystemOrchestrator:
         self.iteration = 0
         self.event_bus = EventBus()
         
+        # Circuit breaker for system protection
+        import os
+        circuit_config = CircuitBreakerConfig(
+            max_failures=int(os.getenv("CIRCUIT_BREAKER_MAX_FAILURES", "5")),
+            timeout_seconds=int(os.getenv("CIRCUIT_BREAKER_TIMEOUT", "300")),
+            data_quality_threshold=float(os.getenv("CIRCUIT_BREAKER_DATA_QUALITY_THRESHOLD", "0.8")),
+            equity_drop_threshold=float(os.getenv("CIRCUIT_BREAKER_EQUITY_DROP_THRESHOLD", "0.10"))
+        )
+        self.circuit_breaker = CircuitBreaker(config=circuit_config)
+        
+        # Monitoring metrics
+        self.monitoring_metrics = {
+            "llm_success_count": 0,
+            "llm_failure_count": 0,
+            "total_iterations": 0,
+            "successful_iterations": 0,
+            "failed_iterations": 0,
+            "recent_signals": [],
+            "recent_equity_values": []
+        }
+        
         # Initialize agents
         logger.info("Initializing agents...")
         try:
@@ -73,6 +95,35 @@ class AsyncTradingSystemOrchestrator:
         # Store iteration state
         self._current_iteration_data: Dict[str, Any] = {}
         self._iteration_complete_event = asyncio.Event()
+    
+    def get_monitoring_metrics(self) -> Dict[str, Any]:
+        """
+        Get monitoring metrics for dashboard.
+        
+        Returns:
+            Dictionary with all monitoring metrics
+        """
+        llm_total = (
+            self.monitoring_metrics["llm_success_count"] + 
+            self.monitoring_metrics["llm_failure_count"]
+        )
+        llm_success_rate = (
+            (self.monitoring_metrics["llm_success_count"] / llm_total * 100)
+            if llm_total > 0 else 0.0
+        )
+        
+        return {
+            "iteration_count": self.iteration,
+            "total_iterations": self.monitoring_metrics["total_iterations"],
+            "successful_iterations": self.monitoring_metrics["successful_iterations"],
+            "failed_iterations": self.monitoring_metrics["failed_iterations"],
+            "llm_success_count": self.monitoring_metrics["llm_success_count"],
+            "llm_failure_count": self.monitoring_metrics["llm_failure_count"],
+            "llm_success_rate": round(llm_success_rate, 2),
+            "recent_signals": self.monitoring_metrics["recent_signals"],
+            "recent_equity_values": self.monitoring_metrics["recent_equity_values"],
+            "circuit_breaker": self.circuit_breaker.get_metrics()
+        }
     
     def _setup_subscriptions(self) -> None:
         """Setup event subscriptions for agent communication."""
@@ -145,6 +196,29 @@ class AsyncTradingSystemOrchestrator:
     
     async def _handle_approved_ready(self, signals: List[TradingSignal]) -> None:
         """Handle approved_ready event - trigger ExecutionAgent."""
+        # Check account equity before execution (circuit breaker protection)
+        try:
+            account = await self._async_process(self.execution_agent.get_account)
+            if account and hasattr(account, 'equity'):
+                current_equity = float(account.equity)
+                self.circuit_breaker.check_equity_drop(current_equity)
+                # Track equity for monitoring
+                self.monitoring_metrics["recent_equity_values"].append({
+                    "timestamp": datetime.now(),
+                    "equity": current_equity
+                })
+                # Keep only last 100 equity values
+                if len(self.monitoring_metrics["recent_equity_values"]) > 100:
+                    self.monitoring_metrics["recent_equity_values"] = \
+                        self.monitoring_metrics["recent_equity_values"][-100:]
+                
+                if self.circuit_breaker.is_open():
+                    logger.error("Circuit breaker opened due to equity drop - stopping execution")
+                    await self.event_bus.publish('executed_ready', [])
+                    return
+        except Exception as e:
+            logger.warning(f"Failed to check account equity: {e}")
+        
         if not signals:
             logger.info("No signals to execute, skipping ExecutionAgent")
             await self.event_bus.publish('executed_ready', [])
@@ -217,8 +291,30 @@ class AsyncTradingSystemOrchestrator:
             self._current_iteration_data['audit_report'] = report
             logger.info("Iteration complete, audit report generated")
             
+            # Update monitoring metrics
+            signals = self._current_iteration_data.get('signals', [])
+            if signals:
+                self.monitoring_metrics["recent_signals"].extend([
+                    {
+                        "symbol": s.symbol,
+                        "action": s.action.value,
+                        "confidence": s.confidence,
+                        "strategy": s.strategy_name,
+                        "timestamp": datetime.now()
+                    }
+                    for s in signals
+                ])
+                # Keep only last 100 signals
+                if len(self.monitoring_metrics["recent_signals"]) > 100:
+                    self.monitoring_metrics["recent_signals"] = \
+                        self.monitoring_metrics["recent_signals"][-100:]
+            
+            # Mark iteration as successful
+            self.monitoring_metrics["successful_iterations"] += 1
+            
         except Exception as e:
             logger.exception(f"Error in AuditAgent: {e}")
+            self.monitoring_metrics["failed_iterations"] += 1
         finally:
             # Signal iteration complete
             self._iteration_complete_event.set()
@@ -324,6 +420,16 @@ class AsyncTradingSystemOrchestrator:
         
         try:
             while self.running:
+                # Check circuit breaker before iteration
+                if self.circuit_breaker.is_open():
+                    logger.error(
+                        f"CIRCUIT BREAKER IS OPEN - Skipping iteration. "
+                        f"Reason: {self.circuit_breaker.get_metrics()}"
+                    )
+                    await asyncio.sleep(self.config.loop_interval_seconds)
+                    continue
+                
+                self.monitoring_metrics["total_iterations"] += 1
                 await self.run_async_pipeline()
                 
                 if self.running:

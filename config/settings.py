@@ -115,8 +115,17 @@ class DatabaseConfig:
     def from_env(cls) -> Optional["DatabaseConfig"]:
         """Load database config from environment."""
         url = os.getenv("DATABASE_URL")
+        # Default to SQLite if no DATABASE_URL is set
         if not url:
-            return None
+            # Use default SQLite database in project root
+            default_db_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "trading_system.db"
+            )
+            url = f"sqlite:///{default_db_path}"
+            logger = logging.getLogger(__name__)
+            logger.info(f"Using default SQLite database: {url}")
+        
         return cls(
             url=url,
             echo=os.getenv("DATABASE_ECHO", "false").lower() == "true",
