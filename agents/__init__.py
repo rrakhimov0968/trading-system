@@ -5,6 +5,7 @@ from agents.data_agent import DataAgent
 from agents.strategy_agent import StrategyAgent
 from agents.quant_agent import QuantAgent
 from agents.risk_agent import RiskAgent
+from agents.audit_agent import AuditAgent
 
 __all__ = [
     "BaseAgent",
@@ -13,5 +14,6 @@ __all__ = [
     "StrategyAgent",
     "QuantAgent",
     "RiskAgent",
+    "AuditAgent",
 ]
 

@@ -12,6 +12,9 @@ from agents.execution_agent import ExecutionAgent
 from agents.strategy_agent import StrategyAgent
 from agents.quant_agent import QuantAgent
 from agents.risk_agent import RiskAgent
+from agents.audit_agent import AuditAgent
+from models.audit import IterationSummary, ExecutionResult
+from models.signal import SignalAction
 from utils.exceptions import TradingSystemError
 
 logger = logging.getLogger(__name__)
@@ -22,12 +25,12 @@ class TradingSystemOrchestrator:
     Orchestrates the trading system agents in a continuous loop.
     
     Flow:
-    1. DataAgent fetches market data
+    1. DataAgent fetches market data ✅
     2. Strategy Agent evaluates data and generates signals ✅
     3. Quant Agent validates signals and adjusts confidence ✅
     4. Risk Agent validates trades and calculates position sizing ✅
-    5. Execution Agent executes approved trades (future)
-    6. Audit Agent logs and reports (future)
+    5. Execution Agent executes approved trades ✅
+    6. Audit Agent logs and reports ✅
     """
     
     def __init__(self, config: AppConfig):
@@ -49,8 +52,7 @@ class TradingSystemOrchestrator:
             self.quant_agent = QuantAgent(config=config)
             self.risk_agent = RiskAgent(config=config)
             self.execution_agent = ExecutionAgent(config=config)
-            # TODO: Initialize other agents as they're implemented
-            # self.audit_agent = AuditAgent(config=config)
+            self.audit_agent = AuditAgent(config=config)
             
             logger.info("All agents initialized successfully")
         except Exception as e:
@@ -121,6 +123,7 @@ class TradingSystemOrchestrator:
             "QuantAgent": self.quant_agent.health_check(),
             "RiskAgent": self.risk_agent.health_check(),
             "ExecutionAgent": self.execution_agent.health_check(),
+            "AuditAgent": self.audit_agent.health_check(),
         }
         
         all_healthy = True
@@ -171,6 +174,11 @@ class TradingSystemOrchestrator:
                         f"  {symbol}: {len(data.bars)} bars, "
                         f"latest close=${latest_bar.close:.2f}, volume={latest_bar.volume:,}"
                     )
+            
+            # Initialize variables for iteration summary
+            signals = []
+            execution_results = []
+            executed_count = 0
             
             # Step 2: Strategy Agent evaluates data and generates signals
             logger.info("Step 2: Evaluating market data and generating signals...")
@@ -253,6 +261,11 @@ class TradingSystemOrchestrator:
                     if signal.action == SignalAction.HOLD:
                         continue  # Skip HOLD signals
                     
+                    execution_result = ExecutionResult(
+                        signal=signal,
+                        execution_time=datetime.now()
+                    )
+                    
                     try:
                         order_request = {
                             "symbol": signal.symbol,
@@ -262,30 +275,55 @@ class TradingSystemOrchestrator:
                         }
                         
                         result = self.execution_agent.process(order_request)
+                        execution_result.order_id = result.get('order_id')
+                        execution_result.executed = True
+                        execution_result.fill_price = signal.price
                         executed_count += 1
+                        
                         logger.info(
                             f"Order executed for {signal.symbol}: {result.get('order_id', 'N/A')}"
                         )
                     except Exception as e:
+                        execution_result.executed = False
+                        execution_result.error = str(e)
                         logger.error(
                             f"ExecutionAgent failed for {signal.symbol}: {e}",
                             exc_info=True
                         )
                         # Continue with next trade
+                    
+                    execution_results.append(execution_result)
                 
                 if executed_count == 0:
                     logger.info("No trades executed (all signals were HOLD or execution failed)")
             else:
                 logger.info("No approved signals to execute")
             
-            # Step 6: Audit Agent would log and report
-            # TODO: Implement Audit Agent
-            # try:
-            #     self.audit_agent.process(iteration_results)
-            # except Exception as e:
-            #     logger.error(f"AuditAgent failed: {e}", exc_info=True)
-            
+            # Step 6: Audit Agent generates report
             iteration_duration = (datetime.now() - iteration_start).total_seconds()
+            
+            # Create iteration summary
+            iteration_summary = IterationSummary(
+                iteration_number=self.iteration,
+                timestamp=iteration_start,
+                symbols_processed=list(market_data.keys()) if market_data else [],
+                signals_generated=len(signals),
+                signals_validated=len(signals),
+                signals_approved=len([s for s in signals if getattr(s, 'approved', False)]),
+                signals_executed=executed_count,
+                execution_results=execution_results,
+                errors=[],  # Could collect errors from each step
+                duration_seconds=iteration_duration
+            )
+            
+            try:
+                audit_report = self.audit_agent.process(iteration_summary, execution_results)
+                logger.info("Step 6: Audit report generated")
+                logger.info(f"Audit Summary: {audit_report.summary[:200]}...")  # First 200 chars
+            except Exception as e:
+                logger.error(f"AuditAgent failed: {e}", exc_info=True)
+                # Continue - audit failure shouldn't stop the system
+            
             logger.info(f"Iteration {self.iteration} completed in {iteration_duration:.2f} seconds")
             
         except TradingSystemError as e:
