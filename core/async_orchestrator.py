@@ -19,6 +19,7 @@ from models.market_data import MarketData
 from utils.event_bus import EventBus
 from utils.exceptions import TradingSystemError
 from utils.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from core.market_hours import is_market_open, get_market_status_message
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +357,13 @@ class AsyncTradingSystemOrchestrator:
         logger.info(f"Async Iteration {self.iteration} started at {iteration_start.isoformat()}")
         logger.info("-" * 60)
         
+        # Check if market is open before running full pipeline
+        if not is_market_open():
+            status_msg = get_market_status_message()
+            logger.info(f"Market is closed. {status_msg}")
+            logger.info("Skipping iteration until market opens")
+            return {"status": "market_closed", "message": status_msg}
+        
         # Reset iteration state
         self._current_iteration_data = {}
         self._iteration_complete_event.clear()
@@ -427,6 +435,14 @@ class AsyncTradingSystemOrchestrator:
                         f"Reason: {self.circuit_breaker.get_metrics()}"
                     )
                     await asyncio.sleep(self.config.loop_interval_seconds)
+                    continue
+                
+                # Check market hours - if closed, sleep longer
+                if not is_market_open():
+                    status_msg = get_market_status_message()
+                    logger.debug(f"Market is closed. {status_msg}")
+                    # Sleep 5 minutes instead of 60 seconds when market is closed
+                    await asyncio.sleep(300)
                     continue
                 
                 self.monitoring_metrics["total_iterations"] += 1

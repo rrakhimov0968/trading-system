@@ -18,6 +18,7 @@ from models.audit import IterationSummary, ExecutionResult
 from models.signal import SignalAction
 from utils.exceptions import TradingSystemError
 from utils.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from core.market_hours import is_market_open, get_market_status_message
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,14 @@ class TradingSystemOrchestrator:
         
         try:
             while self.running:
+                # Check market hours - if closed, sleep longer
+                if not is_market_open():
+                    status_msg = get_market_status_message()
+                    logger.debug(f"Market is closed. {status_msg}")
+                    # Sleep 5 minutes instead of 60 seconds when market is closed
+                    time.sleep(300)
+                    continue
+                
                 self._run_iteration()
                 
                 if self.running:  # Check again in case stop() was called
@@ -194,6 +203,13 @@ class TradingSystemOrchestrator:
         logger.info("-" * 60)
         logger.info(f"Iteration {self.iteration} started at {iteration_start.isoformat()}")
         logger.info("-" * 60)
+        
+        # Check if market is open before running full pipeline
+        if not is_market_open():
+            status_msg = get_market_status_message()
+            logger.info(f"Market is closed. {status_msg}")
+            logger.info("Skipping iteration until market opens")
+            return
         
         try:
             # Step 1: Fetch market data

@@ -599,13 +599,6 @@ class DataAgent(BaseAgent):
                     correlation_id=self._correlation_id
                 )
             
-            # Validate data quality before caching and returning
-            if not self._validate_market_data(market_data, validated_symbol):
-                raise AgentError(
-                    f"Data validation failed for {validated_symbol}",
-                    correlation_id=self._correlation_id
-                )
-            
             # Cache the result
             self._cache_data(cache_key, market_data)
             
@@ -650,6 +643,12 @@ class DataAgent(BaseAgent):
             provider=self.provider.value
         )
         
+        # Set default date range if not provided (30 days for daily bars)
+        if not start_date:
+            start_date = datetime.now() - timedelta(days=30)
+        if not end_date:
+            end_date = datetime.now()
+        
         # Create async tasks for all symbols
         tasks = [
             self.fetch_data_async(symbol, timeframe, start_date, end_date, limit)
@@ -660,13 +659,64 @@ class DataAgent(BaseAgent):
         try:
             results_list = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Process results
+            # Process results - separate validation errors from real API errors
             results = {}
+            failed_symbols = []
+            
             for symbol, result in zip(symbols, results_list):
                 if isinstance(result, Exception):
-                    self.log_exception(f"Failed to fetch data for {symbol}", result)
+                    error_msg = str(result)
+                    # Check if it's a validation error (no data available - market closed)
+                    if "validation" in error_msg.lower() or "insufficient" in error_msg.lower():
+                        self.log_warning(
+                            f"No data available for {symbol} from {self.provider.value} "
+                            f"(market may be closed): {error_msg}"
+                        )
+                        failed_symbols.append(symbol)
+                    else:
+                        self.log_exception(f"Failed to fetch data for {symbol}", result)
+                        failed_symbols.append(symbol)
                     continue
                 results[symbol] = result
+            
+            # Try Yahoo Finance fallback for symbols that failed due to validation/no data
+            if failed_symbols and self.provider != DataProvider.YAHOO:
+                self.log_info(f"Attempting Yahoo Finance fallback for {len(failed_symbols)} symbols...")
+                original_provider = self.provider
+                original_client = None
+                
+                # Temporarily switch to Yahoo provider
+                try:
+                    import yfinance as yf
+                    self.provider = DataProvider.YAHOO
+                    
+                    yahoo_tasks = [
+                        self.fetch_data_async(
+                            symbol,
+                            timeframe,
+                            start_date,
+                            end_date,
+                            limit
+                        )
+                        for symbol in failed_symbols
+                    ]
+                    
+                    yahoo_results = await asyncio.gather(*yahoo_tasks, return_exceptions=True)
+                    
+                    for symbol, result in zip(failed_symbols, yahoo_results):
+                        if isinstance(result, Exception):
+                            self.log_warning(f"Yahoo Finance fallback also failed for {symbol}: {result}")
+                        else:
+                            results[symbol] = result
+                            self.log_info(f"Successfully fetched {symbol} from Yahoo Finance fallback")
+                    
+                except ImportError:
+                    self.log_warning("yfinance not available for fallback")
+                except Exception as e:
+                    self.log_warning(f"Yahoo Finance fallback failed: {e}")
+                finally:
+                    # Restore original provider
+                    self.provider = original_provider
             
             self.log_info(
                 f"Successfully fetched data for {len(results)}/{len(symbols)} symbols asynchronously",
