@@ -52,7 +52,7 @@ class StrategyAgent(BaseAgent):
         # Initialize Groq client
         try:
             self.groq_client = Groq(api_key=self.config.groq.api_key)
-            self.model = self.config.groq.model or "mixtral-8x7b-32768"
+            self.model = self.config.groq.model or "llama-3.3-70b-versatile"
             self.temperature = self.config.groq.temperature
             self.log_info(f"StrategyAgent initialized with Groq ({self.model})")
         except Exception as e:

@@ -85,7 +85,7 @@ class LLMConfig:
         return cls(
             provider="anthropic",
             api_key=api_key,
-            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),  # Updated to current model
+            model=os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307"),  # Current working Claude model
             max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096"))
         )
     
@@ -98,7 +98,7 @@ class LLMConfig:
         return cls(
             provider="groq",
             api_key=api_key,
-            model=os.getenv("GROQ_MODEL", "mixtral-8x7b-32768"),
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),  # Current working Groq model
             base_url=os.getenv("GROQ_BASE_URL")
         )
 
