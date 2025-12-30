@@ -60,7 +60,7 @@ with st.sidebar:
     
     # Initialize orchestrator if not already initialized
     if st.session_state.orchestrator is None:
-        if st.button("🚀 Connect to Trading System", use_container_width=True, type="primary"):
+        if st.button("🚀 Connect to Trading System", width='stretch', type="primary"):
             try:
                 config = get_config()
                 use_async = os.getenv("USE_ASYNC_ORCHESTRATOR", "true").lower() == "true"
@@ -76,10 +76,10 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Failed to connect: {str(e)}")
     
-    if st.session_state.orchestrator and st.button("🔄 Refresh Metrics", use_container_width=True):
+    if st.session_state.orchestrator and st.button("🔄 Refresh Metrics", width='stretch'):
         st.rerun()
     
-    if st.session_state.orchestrator and st.button("🔌 Disconnect", use_container_width=True):
+    if st.session_state.orchestrator and st.button("🔌 Disconnect", width='stretch'):
         try:
             if hasattr(st.session_state.orchestrator, 'stop'):
                 asyncio.run(st.session_state.orchestrator.stop())
@@ -185,7 +185,7 @@ if st.session_state.orchestrator:
         # Display table
         st.dataframe(
             signals_df[["time", "symbol", "action", "strategy", "confidence"]].tail(20),
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
         
@@ -200,7 +200,7 @@ if st.session_state.orchestrator:
                     names=action_counts.index,
                     title="Signal Actions Distribution"
                 )
-                st.plotly_chart(fig_actions, use_container_width=True)
+                st.plotly_chart(fig_actions, width='stretch')
         
         with col2:
             if "strategy" in signals_df.columns:
@@ -211,7 +211,7 @@ if st.session_state.orchestrator:
                     title="Top 5 Strategies Used",
                     labels={"x": "Strategy", "y": "Count"}
                 )
-                st.plotly_chart(fig_strategies, use_container_width=True)
+                st.plotly_chart(fig_strategies, width='stretch')
     else:
         st.info("No signals generated yet. System may be starting up or waiting for data.")
 else:
@@ -236,7 +236,7 @@ if st.session_state.orchestrator:
                 labels={"equity": "Equity ($)", "timestamp": "Time"}
             )
             fig_equity.update_traces(line_color="#1f77b4")
-            st.plotly_chart(fig_equity, use_container_width=True)
+            st.plotly_chart(fig_equity, width='stretch')
             
             # Equity stats
             col1, col2, col3 = st.columns(3)
@@ -272,7 +272,7 @@ if st.session_state.orchestrator:
             color=list(llm_data.keys()),
             color_discrete_map={"Success": "#28a745", "Failure": "#dc3545"}
         )
-        st.plotly_chart(fig_llm, use_container_width=True)
+        st.plotly_chart(fig_llm, width='stretch')
     
     with col2:
         st.metric("Total LLM Calls", metrics.get("llm_success_count", 0) + metrics.get("llm_failure_count", 0))
