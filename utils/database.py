@@ -157,10 +157,31 @@ class DatabaseManager:
         self.db_config = config.database
         
         if not self.db_config:
-            logger.warning("No database configuration found. Using in-memory SQLite.")
-            db_url = "sqlite:///:memory:"
+            logger.warning("No database configuration found. Using default SQLite.")
+            # Use default SQLite database in project root
+            default_db_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "trading_system.db"
+            )
+            db_url = f"sqlite:///{default_db_path}"
         else:
             db_url = self.db_config.url
+            
+            # Check if PostgreSQL URL but psycopg2 not available - fallback to SQLite
+            if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+                try:
+                    import psycopg2  # noqa: F401
+                except ImportError:
+                    logger.warning(
+                        f"PostgreSQL URL configured but psycopg2 not installed. "
+                        f"Falling back to SQLite: {db_url} → trading_system.db"
+                    )
+                    # Use default SQLite database in project root
+                    default_db_path = os.path.join(
+                        os.path.dirname(os.path.dirname(__file__)),
+                        "trading_system.db"
+                    )
+                    db_url = f"sqlite:///{default_db_path}"
         
         # Create engine
         # SQLite doesn't support pool_size and max_overflow
@@ -174,7 +195,22 @@ class DatabaseManager:
             engine_kwargs["pool_size"] = self.db_config.pool_size if self.db_config else 5
             engine_kwargs["max_overflow"] = self.db_config.max_overflow if self.db_config else 10
         
-        self.engine = create_engine(db_url, **engine_kwargs)
+        try:
+            self.engine = create_engine(db_url, **engine_kwargs)
+        except Exception as e:
+            # If engine creation fails (e.g., missing driver), fallback to SQLite
+            logger.error(f"Failed to create database engine for {db_url}: {e}")
+            logger.warning("Falling back to SQLite database")
+            default_db_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "trading_system.db"
+            )
+            db_url = f"sqlite:///{default_db_path}"
+            engine_kwargs = {
+                "echo": False,
+                "pool_pre_ping": True
+            }
+            self.engine = create_engine(db_url, **engine_kwargs)
         
         # Create session factory
         self.Session = sessionmaker(bind=self.engine)
