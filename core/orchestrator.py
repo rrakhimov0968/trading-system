@@ -219,7 +219,7 @@ class TradingSystemOrchestrator:
                 market_data = self.data_agent.process(
                     symbols=self.config.symbols,
                     timeframe="1Day",
-                    limit=100
+                    limit=252  # 1 year of trading days (252) to satisfy strategies that need 200+ bars
                 )
             except Exception as e:
                 logger.error(f"DataAgent failed: {e}", exc_info=True)

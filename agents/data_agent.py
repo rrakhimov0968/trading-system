@@ -92,7 +92,7 @@ class DataAgent(BaseAgent):
         timeframe: str = "1Day",
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-        limit: int = 100
+        limit: int = 252  # Default to 1 year of trading days (252) to satisfy strategy requirements
     ) -> Dict[str, MarketData]:
         """
         Fetch market data for multiple symbols.
@@ -221,7 +221,9 @@ class DataAgent(BaseAgent):
                 end_date = pytz.UTC.localize(end_date)
             
             if not start_date:
-                start_date = end_date - timedelta(days=30)
+                # Use 1 year lookback (252 trading days) to satisfy strategies that need 200+ bars
+                # 365 calendar days ≈ 252 trading days (accounts for weekends/holidays)
+                start_date = end_date - timedelta(days=365)
             elif start_date.tzinfo is None:
                 # Make timezone-aware if not already
                 start_date = pytz.UTC.localize(start_date)
@@ -468,9 +470,10 @@ class DataAgent(BaseAgent):
             if not end_date:
                 end_date = datetime.now()
             if not start_date:
-                # Default to 30 days for daily, less for intraday
+                # Use 1 year lookback for daily bars to satisfy strategies that need 200+ bars
                 if timeframe in ["1Day", "1Week", "1Month"]:
-                    start_date = end_date - timedelta(days=30)
+                    # 365 calendar days ≈ 252 trading days (accounts for weekends/holidays)
+                    start_date = end_date - timedelta(days=365)
                 else:
                     start_date = end_date - timedelta(days=5)
             
@@ -711,7 +714,7 @@ class DataAgent(BaseAgent):
         timeframe: str = "1Day",
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-        limit: int = 100
+        limit: int = 252  # Default to 1 year of trading days (252) to satisfy strategy requirements
     ) -> MarketData:
         """
         Fetch market data asynchronously for a single symbol.
@@ -838,9 +841,11 @@ class DataAgent(BaseAgent):
             provider=self.provider.value
         )
         
-        # Set default date range if not provided (30 days for daily bars)
+        # Set default date range if not provided
+        # Use 1 year lookback (252 trading days) to satisfy strategies that need 200+ bars
         if not start_date:
-            start_date = datetime.now() - timedelta(days=30)
+            # 365 calendar days ≈ 252 trading days (accounts for weekends/holidays)
+            start_date = datetime.now() - timedelta(days=365)
         if not end_date:
             end_date = datetime.now()
         

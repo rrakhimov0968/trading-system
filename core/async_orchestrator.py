@@ -374,7 +374,7 @@ class AsyncTradingSystemOrchestrator:
             market_data = await self.data_agent.process_async(
                 symbols=symbols,
                 timeframe="1Day",
-                limit=100
+                limit=252  # 1 year of trading days (252) to satisfy strategies that need 200+ bars
             )
             
             if not market_data:
