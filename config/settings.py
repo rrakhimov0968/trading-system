@@ -1,5 +1,6 @@
 """Configuration management for the trading system."""
 import os
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, List
