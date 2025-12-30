@@ -12,7 +12,7 @@ groq==0.4.2                # For Groq API
 # Data and analysis
 yfinance==0.2.36           # For market data
 # ta-lib==0.4.28             # Optional, commented out due to compilation failure
-pandas-ta>=0.3.14b0       # Technical analysis indicators
+pandas-ta>=0.3.14b0  # Technical analysis indicators (version depends on Python: >=0.4.67b0 for 3.12+, <0.4.67b0 for <3.12)
 scipy>=1.11.4,<1.12.0      # Loosened if needed
 statsmodels>=0.14.1,<0.15.0 # Loosened if needed
 
@@ -32,7 +32,7 @@ pytest==7.4.4
 pytest-asyncio==0.23.3
 pytest-cov==4.1.0
 pytest-mock==3.12.0
-requests-mock==1.11.1     # For API mocking in tests
+requests-mock==1.11.0     # For API mocking in tests (1.11.1 doesn't exist)
 
 # Monitoring
 prometheus-client==0.19.0  # Metrics (optional)

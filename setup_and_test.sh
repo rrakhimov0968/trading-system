@@ -66,12 +66,28 @@ else
     exit 1
 fi
 
-# Try pandas-ta with error handling
-if pip install pandas-ta --no-cache-dir --quiet 2>/dev/null; then
-    echo -e "${GREEN}✓ pandas-ta installed${NC}"
+# Try pandas-ta with error handling (Python version dependent)
+# pandas-ta has compatibility issues with Python 3.13, try multiple approaches
+PYTHON_VERSION_CHECK=$(python3 -c "import sys; v=sys.version_info; print('1' if v.major==3 and v.minor>=12 else '0')" 2>/dev/null || echo "0")
+
+if [ "$PYTHON_VERSION_CHECK" = "1" ]; then
+    # Python 3.12+ - try newer version first
+    if pip install "pandas-ta>=0.4.67b0" --no-cache-dir --quiet 2>/dev/null; then
+        echo -e "${GREEN}✓ pandas-ta installed (newer version)${NC}"
+    elif pip install "pandas-ta>=0.3.14b0,<0.4.67b0" --no-cache-dir --quiet 2>/dev/null; then
+        echo -e "${GREEN}✓ pandas-ta installed (compatible version)${NC}"
+    else
+        echo -e "${YELLOW}⚠️  pandas-ta installation failed, trying without constraint...${NC}"
+        pip install pandas-ta --no-cache-dir --quiet 2>/dev/null || echo -e "${YELLOW}⚠️  pandas-ta skipped (may not be available for Python 3.13), continuing...${NC}"
+    fi
 else
-    echo -e "${YELLOW}⚠️  pandas-ta installation had issues, trying alternative...${NC}"
-    pip install pandas-ta --quiet || echo -e "${YELLOW}⚠️  pandas-ta may have issues, continuing anyway...${NC}"
+    # Python < 3.12 needs older version
+    if pip install "pandas-ta>=0.3.14b0,<0.4.67b0" --no-cache-dir --quiet 2>/dev/null; then
+        echo -e "${GREEN}✓ pandas-ta installed${NC}"
+    else
+        echo -e "${YELLOW}⚠️  pandas-ta installation had issues, trying without version constraint...${NC}"
+        pip install pandas-ta --no-cache-dir --quiet 2>/dev/null || echo -e "${YELLOW}⚠️  pandas-ta skipped (optional), continuing...${NC}"
+    fi
 fi
 
 if pip install requests==2.31.0 aiohttp==3.9.1 python-dateutil==2.8.2 pytz==2023.3 pydantic==2.5.0 --quiet; then
@@ -81,7 +97,7 @@ else
     exit 1
 fi
 
-if pip install pytest==7.4.4 pytest-asyncio==0.23.3 pytest-cov==4.1.0 pytest-mock==3.12.0 requests-mock==1.11.1 --quiet; then
+if pip install pytest==7.4.4 pytest-asyncio==0.23.3 pytest-cov==4.1.0 pytest-mock==3.12.0 requests-mock==1.11.0 --quiet; then
     echo -e "${GREEN}✓ Testing dependencies installed${NC}"
 else
     echo -e "${RED}✗ Failed to install testing dependencies${NC}"

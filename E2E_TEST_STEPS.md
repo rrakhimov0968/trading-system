@@ -75,9 +75,21 @@ pip install alpaca-py==0.21.0 anthropic==0.18.1 openai==1.12.0 groq==0.4.2
 pip install yfinance==0.2.36 pandas-ta scipy statsmodels
 ```
 
-**Note**: If `pandas-ta` fails, try:
+**Note**: `pandas-ta` has version-specific requirements:
+- **Python 3.12+**: Can use `pandas-ta>=0.4.67b0`
+- **Python < 3.12**: Must use `pandas-ta>=0.3.14b0,<0.4.67b0`
+- **Python 3.13**: May not have pre-built wheels yet (install from source or skip)
+
+If `pandas-ta` fails, try:
 ```bash
-pip install pandas-ta --no-cache-dir
+# For Python 3.11
+pip install "pandas-ta>=0.3.14b0,<0.4.67b0" --no-cache-dir
+
+# For Python 3.12
+pip install "pandas-ta>=0.4.67b0" --no-cache-dir
+
+# For Python 3.13 (if above fails, skip pandas-ta - it's optional for core functionality)
+pip install pandas-ta --no-cache-dir || echo "pandas-ta skipped (optional)"
 ```
 
 ### Stage 4: Database (Optional - skip if not using PostgreSQL)
@@ -96,7 +108,7 @@ pip install requests==2.31.0 aiohttp==3.9.1 python-dateutil==2.8.2 pytz==2023.3 
 ### Stage 6: Testing
 
 ```bash
-pip install pytest==7.4.4 pytest-asyncio==0.23.3 pytest-cov==4.1.0 pytest-mock==3.12.0 requests-mock==1.11.1
+pip install pytest==7.4.4 pytest-asyncio==0.23.3 pytest-cov==4.1.0 pytest-mock==3.12.0 requests-mock==1.11.0
 ```
 
 ### Stage 7: Monitoring (Optional)
@@ -123,7 +135,14 @@ pip install numpy scipy  # Install these first as they're dependencies
 pip install -r requirements.txt
 ```
 
-### Issue 2: "No module named '_tkinter'" (macOS)
+### Issue 2: "ERROR: No matching distribution found for requests-mock==1.11.1"
+
+**Solution**: Version 1.11.1 doesn't exist. Use 1.11.0 or 1.12.1:
+```bash
+pip install requests-mock==1.11.0
+```
+
+### Issue 2b: "No module named '_tkinter'" (macOS)
 
 **Solution**: Install Python with tkinter:
 ```bash
@@ -131,25 +150,38 @@ pip install -r requirements.txt
 brew install python-tk
 ```
 
-### Issue 3: "ERROR: Failed building wheel" for pandas-ta
+### Issue 3: "ERROR: Failed building wheel" for pandas-ta or "No matching distribution found"
 
-**Solution**: Try installing without cache:
+**Solution**: pandas-ta has strict Python version requirements:
+- **Python 3.11**: Use `pip install "pandas-ta>=0.3.14b0,<0.4.67b0"`
+- **Python 3.12**: Use `pip install "pandas-ta>=0.4.67b0"`
+- **Python 3.13**: May not have pre-built wheels. Options:
+  1. Use Python 3.12 instead (recommended)
+  2. Skip pandas-ta (optional - system will work without it)
+  3. Install from source: `pip install git+https://github.com/twopirllc/pandas-ta.git`
+  
 ```bash
-pip install pandas-ta --no-cache-dir
-# Or install from source:
-pip install git+https://github.com/twopirllc/pandas-ta.git
+# Try version-specific install
+pip install "pandas-ta>=0.3.14b0,<0.4.67b0" --no-cache-dir
 ```
 
 ### Issue 4: Python version incompatibility
 
-**Solution**: Use Python 3.11 or 3.12:
+**Solution**: Use Python 3.11 or 3.12 (3.13 may have compatibility issues with some packages):
 ```bash
 # Check version
 python --version
 
-# If it's 3.13 or higher, create venv with specific version:
+# If it's 3.13, create venv with Python 3.12 instead:
 python3.12 -m venv venv  # If you have 3.12 installed
+
+# Or using pyenv:
+pyenv install 3.12.7
+pyenv local 3.12.7
+python -m venv venv
 ```
+
+**Note**: Python 3.13 is very new and some packages (like pandas-ta) may not have pre-built wheels yet.
 
 ### Issue 5: SSL/TLS errors during installation
 
