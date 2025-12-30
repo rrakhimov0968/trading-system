@@ -661,17 +661,4 @@ class DataAgent(BaseAgent):
         except (AttributeError, RuntimeError):
             # Object partially deleted or no event loop available
             pass
-    
-    def __del__(self):
-        """Cleanup async resources on deletion."""
-        if self._async_session and not self._async_session.closed:
-            # Try to close session synchronously (best effort)
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self._async_session.close())
-                else:
-                    loop.run_until_complete(self._async_session.close())
-            except Exception:
-                pass  # Ignore errors during cleanup
 
