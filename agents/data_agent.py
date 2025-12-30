@@ -226,12 +226,49 @@ class DataAgent(BaseAgent):
                 limit=limit
             )
             
+            self.log_debug(
+                f"Alpaca API request for {symbol}: "
+                f"timeframe={alpaca_tf}, start={start_date}, end={end_date}, limit={limit}"
+            )
+            
             bars_response = self.alpaca_client.get_stock_bars(request_params)
+            
+            # Debug: Log what Alpaca actually returned
+            self.log_debug(
+                f"Alpaca response for {symbol}: "
+                f"type={type(bars_response)}, "
+                f"keys={list(bars_response.keys()) if hasattr(bars_response, 'keys') else 'N/A'}, "
+                f"is_dict={isinstance(bars_response, dict)}"
+            )
             
             # Convert to our Bar model
             bars = []
-            if symbol in bars_response:
-                for bar in bars_response[symbol]:
+            
+            # Handle different response structures from Alpaca
+            if isinstance(bars_response, dict):
+                if symbol in bars_response:
+                    bar_list = bars_response[symbol]
+                    self.log_debug(f"Found {len(bar_list)} bars for {symbol} in response dict")
+                    for bar in bar_list:
+                        bars.append(Bar(
+                            timestamp=bar.timestamp,
+                            open=float(bar.open),
+                            high=float(bar.high),
+                            low=float(bar.low),
+                            close=float(bar.close),
+                            volume=int(bar.volume),
+                            symbol=symbol,
+                            timeframe=timeframe
+                        ))
+                else:
+                    self.log_warning(
+                        f"Symbol {symbol} not found in Alpaca response. "
+                        f"Available keys: {list(bars_response.keys())}"
+                    )
+            elif hasattr(bars_response, '__iter__'):
+                # Handle case where response is iterable directly
+                self.log_debug(f"Alpaca response is iterable, processing bars directly")
+                for bar in bars_response:
                     bars.append(Bar(
                         timestamp=bar.timestamp,
                         open=float(bar.open),
@@ -242,6 +279,12 @@ class DataAgent(BaseAgent):
                         symbol=symbol,
                         timeframe=timeframe
                     ))
+            else:
+                self.log_warning(
+                    f"Unexpected Alpaca response type for {symbol}: {type(bars_response)}"
+                )
+            
+            self.log_info(f"Converted {len(bars)} bars for {symbol} from Alpaca response")
             
             market_data = MarketData(symbol=symbol, bars=bars)
             
