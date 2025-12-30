@@ -16,6 +16,8 @@ from models.signal import TradingSignal, SignalAction
 @pytest.fixture
 def mock_config() -> AppConfig:
     """Create a mock configuration for testing."""
+    from config.settings import DataProviderConfig, DataProvider
+    
     return AppConfig(
         trading_mode=TradingMode.PAPER,
         log_level=LogLevel.DEBUG,
@@ -23,6 +25,11 @@ def mock_config() -> AppConfig:
             api_key="test_api_key",
             secret_key="test_secret_key",
             paper=True
+        ),
+        data_provider=DataProviderConfig(
+            provider=DataProvider.YAHOO,
+            rate_limit_per_minute=10,
+            cache_ttl_seconds=300
         )
     )
 
@@ -104,11 +111,11 @@ def mock_market_data() -> Dict[str, MarketData]:
         bars = []
         base_price = 100.0 if symbol == "SPY" else 150.0
         
-        # Create 100 days of historical data with upward trend
-        for i in range(100):
+        # Create 250 days of historical data with upward trend (need at least 200 for MA strategies)
+        for i in range(250):
             price = base_price + (i * 0.1) + np.random.normal(0, 0.5)
             bars.append(Bar(
-                timestamp=datetime.now() - timedelta(days=100 - i),
+                timestamp=datetime.now() - timedelta(days=250 - i),
                 open=price - 0.5,
                 high=price + 1.0,
                 low=price - 1.0,
@@ -158,7 +165,7 @@ def mock_anthropic_client(mocker):
 @pytest.fixture
 def test_config_with_llms(mock_config):
     """Create test config with all LLM providers configured."""
-    from config.settings import LLMConfig
+    from config.settings import LLMConfig, DataProviderConfig, DataProvider
     
     mock_config.groq = LLMConfig(
         provider="groq",
@@ -174,6 +181,13 @@ def test_config_with_llms(mock_config):
         provider="openai",
         api_key="test_openai_key",
         model="gpt-4"
+    )
+    
+    # Add data provider (Yahoo Finance doesn't need API key)
+    mock_config.data_provider = DataProviderConfig(
+        provider=DataProvider.YAHOO,
+        rate_limit_per_minute=10,
+        cache_ttl_seconds=300
     )
     
     # Add symbols

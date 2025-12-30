@@ -134,7 +134,7 @@ class TestPipelineEndToEnd:
     """End-to-end tests for the complete trading pipeline."""
     
     @patch('agents.strategy_agent.Groq')
-    @patch('agents.audit_agent.Anthropic')
+    @patch('anthropic.Anthropic')
     @patch('agents.data_agent.yf.Ticker')
     def test_full_pipeline_with_mocks(
         self,
@@ -178,8 +178,8 @@ class TestPipelineEndToEnd:
         assert report.metrics["signals_generated"] >= 0
     
     @patch('agents.strategy_agent.Groq')
-    @patch('agents.audit_agent.Anthropic')
-    @patch('agents.execution_agent.TradingClient')
+    @patch('anthropic.Anthropic')
+    @patch('alpaca.trading.client.TradingClient')
     def test_pipeline_with_no_signals(
         self,
         mock_trading_client,
@@ -205,7 +205,10 @@ class TestPipelineEndToEnd:
         mock_anthropic.return_value = mock_anthropic_client
         
         # Mock execution agent
-        mock_trading_client.return_value.get_account.return_value.cash = "100000.00"
+        mock_account = Mock()
+        mock_account.cash = "100000.00"
+        mock_account.equity = "100000.00"
+        mock_trading_client.return_value.get_account.return_value = mock_account
         
         # Run pipeline
         symbols = ["SPY"]
@@ -216,13 +219,11 @@ class TestPipelineEndToEnd:
         assert "no" in report.summary.lower() or report.metrics.get("signals_generated", 0) == 0
     
     @patch('agents.strategy_agent.Groq')
-    @patch('agents.audit_agent.Anthropic')
-    @patch('agents.execution_agent.TradingClient')
-    @patch('agents.risk_agent.TradingClient')
+    @patch('anthropic.Anthropic')
+    @patch('alpaca.trading.client.TradingClient')
     def test_pipeline_execution_flow(
         self,
-        mock_risk_trading_client,
-        mock_exec_trading_client,
+        mock_trading_client,
         mock_anthropic,
         mock_groq,
         test_config_with_llms,
@@ -245,21 +246,16 @@ class TestPipelineEndToEnd:
         mock_anthropic_client.messages.create.return_value = mock_message
         mock_anthropic.return_value = mock_anthropic_client
         
-        # Setup execution client mock
+        # Setup execution client mock (used by both ExecutionAgent and RiskAgent via execution_agent.get_account())
         mock_account = Mock()
         mock_account.cash = "100000.00"
+        mock_account.equity = "100000.00"
         mock_account.buying_power = "100000.00"
-        mock_exec_trading_client.return_value.get_account.return_value = mock_account
+        mock_trading_client.return_value.get_account.return_value = mock_account
         
         mock_order = Mock()
         mock_order.id = "test_order_123"
-        mock_exec_trading_client.return_value.submit_order.return_value = mock_order
-        
-        # Setup risk client mock
-        mock_risk_account = Mock()
-        mock_risk_account.cash = "100000.00"
-        mock_risk_account.buying_power = "100000.00"
-        mock_risk_trading_client.return_value.get_account.return_value = mock_risk_account
+        mock_trading_client.return_value.submit_order.return_value = mock_order
         
         # Run pipeline
         symbols = ["SPY"]
@@ -271,9 +267,11 @@ class TestPipelineEndToEnd:
         assert "execution" in report.summary.lower() or "trade" in report.summary.lower() or report.metrics.get("signals_executed", 0) >= 0
     
     @patch('agents.strategy_agent.Groq')
-    @patch('agents.audit_agent.Anthropic')
+    @patch('anthropic.Anthropic')
+    @patch('alpaca.trading.client.TradingClient')
     def test_pipeline_metrics_accuracy(
         self,
+        mock_trading_client,
         mock_anthropic,
         mock_groq,
         test_config_with_llms,
@@ -294,6 +292,12 @@ class TestPipelineEndToEnd:
         mock_message.content = [Mock(text="Test report")]
         mock_anthropic_client.messages.create.return_value = mock_message
         mock_anthropic.return_value = mock_anthropic_client
+        
+        # Mock execution client
+        mock_account = Mock()
+        mock_account.cash = "100000.00"
+        mock_account.equity = "100000.00"
+        mock_trading_client.return_value.get_account.return_value = mock_account
         
         # Run pipeline
         symbols = ["SPY", "QQQ"]
@@ -337,7 +341,7 @@ class TestPipelineErrorHandling:
             run_pipeline(["SPY"], test_config_with_llms)
     
     @patch('agents.strategy_agent.Groq')
-    @patch('agents.audit_agent.Anthropic')
+    @patch('anthropic.Anthropic')
     def test_pipeline_handles_strategy_agent_failure(
         self,
         mock_anthropic,
