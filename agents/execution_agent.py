@@ -14,6 +14,7 @@ from models.validation import (
 )
 from utils.exceptions import ExecutionError, APIError, ValidationError
 from utils.retry import retry_with_backoff, RetryConfig
+from utils.rate_limiter import get_rate_limiter
 
 
 class ExecutionAgent(BaseAgent):
@@ -32,6 +33,16 @@ class ExecutionAgent(BaseAgent):
             config: Application configuration. If None, loads from environment.
         """
         super().__init__(config)
+        
+        # Initialize rate limiter for API calls
+        # Use same limit as DataAgent: 200 requests/minute (shared limit for account)
+        # Note: Alpaca's limit is per account, so we need to be conservative
+        self.rate_limiter = get_rate_limiter(
+            name="alpaca_trading",  # Shared with other trading operations
+            max_requests=200,  # Same as data API - shared account limit
+            window_seconds=60
+        )
+        self.log_info(f"Rate limiter configured: 200 requests/minute")
         
         # Initialize Alpaca client
         try:
@@ -130,6 +141,14 @@ class ExecutionAgent(BaseAgent):
             APIError: If API call fails after retries
         """
         try:
+            # Acquire rate limiter before making API call
+            if not self.rate_limiter.acquire(blocking=True, timeout=60.0):
+                raise APIError(
+                    "Rate limiter timeout - too many requests",
+                    status_code=429,
+                    correlation_id=self._correlation_id
+                )
+            
             self.log_debug("Fetching account information")
             account = self.client.get_account()
             self.log_info(
@@ -181,6 +200,13 @@ class ExecutionAgent(BaseAgent):
         )
         
         try:
+            # Acquire rate limiter before making API call
+            if not self.rate_limiter.acquire(blocking=True, timeout=60.0):
+                raise ExecutionError(
+                    "Rate limiter timeout - too many requests",
+                    correlation_id=self._correlation_id
+                )
+            
             # Convert our OrderSide enum to Alpaca's enum
             alpaca_side = AlpacaOrderSide.BUY if side == OrderSide.BUY else AlpacaOrderSide.SELL
             
@@ -241,6 +267,14 @@ class ExecutionAgent(BaseAgent):
             APIError: If API call fails
         """
         try:
+            # Acquire rate limiter before making API call
+            if not self.rate_limiter.acquire(blocking=True, timeout=60.0):
+                raise APIError(
+                    "Rate limiter timeout - too many requests",
+                    status_code=429,
+                    correlation_id=self._correlation_id
+                )
+            
             self.log_debug("Fetching open positions")
             positions = self.client.get_all_positions()
             self.log_info(f"Retrieved {len(positions)} open positions")

@@ -16,6 +16,7 @@ from models.market_data import MarketData, Bar, Quote, Trade
 from models.validation import validate_symbol
 from utils.exceptions import APIError, AgentError
 from utils.retry import retry_with_backoff, RetryConfig
+from utils.rate_limiter import get_rate_limiter
 from config.settings import DataProvider, DataProviderConfig
 
 
@@ -49,6 +50,18 @@ class DataAgent(BaseAgent):
         # Async session for HTTP requests (initialized lazily)
         self._async_session: Optional[aiohttp.ClientSession] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        
+        # Initialize rate limiter for API calls
+        # Default: 200 requests/minute for Alpaca (their standard limit)
+        max_requests = self.data_config.rate_limit_per_minute if self.data_config else 200
+        # Use shared rate limiter name since Alpaca's limit is per account
+        # All DataAgent instances must share the same limiter
+        self.rate_limiter = get_rate_limiter(
+            name="alpaca_data",  # Shared across all DataAgent instances
+            max_requests=max_requests,
+            window_seconds=60
+        )
+        self.log_info(f"Rate limiter configured: {max_requests} requests/minute")
         
         # Initialize provider-specific clients
         if self.provider == DataProvider.ALPACA:
@@ -178,6 +191,14 @@ class DataAgent(BaseAgent):
         limit: int
     ) -> MarketData:
         """Fetch data from Alpaca Data API."""
+        # Acquire rate limiter before making API call
+        if self.provider == DataProvider.ALPACA:
+            if not self.rate_limiter.acquire(blocking=True, timeout=60.0):
+                raise AgentError(
+                    f"Rate limiter timeout for {symbol} - too many requests",
+                    correlation_id=self._correlation_id
+                )
+        
         try:
             # Map timeframe string to Alpaca TimeFrame
             tf_mapping = {
@@ -551,6 +572,14 @@ class DataAgent(BaseAgent):
             if cached_data:
                 self.log_debug(f"Using cached data for {validated_symbol}")
                 return cached_data
+            
+            # Acquire rate limiter before making API call (for Alpaca)
+            if self.provider == DataProvider.ALPACA:
+                if not await self.rate_limiter.acquire_async(blocking=True, timeout=60.0):
+                    raise AgentError(
+                        f"Rate limiter timeout for {validated_symbol} - too many requests",
+                        correlation_id=self._correlation_id
+                    )
             
             # Fetch data using async wrapper around sync methods
             # Since yfinance and Alpaca clients are sync, we wrap them in executor
