@@ -32,6 +32,24 @@ if "metrics" not in st.session_state:
 if "running" not in st.session_state:
     st.session_state.running = False
 
+# Auto-initialize orchestrator for metrics (read-only, doesn't start trading loop)
+if st.session_state.orchestrator is None:
+    try:
+        config = get_config()
+        use_async = os.getenv("USE_ASYNC_ORCHESTRATOR", "true").lower() == "true"
+        
+        if use_async:
+            # Create async orchestrator instance (for metrics only)
+            st.session_state.orchestrator = AsyncTradingSystemOrchestrator(config=config)
+        else:
+            # Create sync orchestrator instance (for metrics only)
+            st.session_state.orchestrator = TradingSystemOrchestrator(config=config)
+        
+        # Note: We don't call start() - this is just for reading metrics
+        # The actual trading system runs separately via main.py
+    except Exception as e:
+        st.warning(f"Could not initialize orchestrator: {str(e)}. Metrics will not be available.")
+
 # Title
 st.title("📈 AI Trading System Monitor")
 st.markdown("---")
@@ -40,8 +58,36 @@ st.markdown("---")
 with st.sidebar:
     st.header("System Controls")
     
-    if st.button("🔄 Refresh Metrics", use_container_width=True):
+    # Initialize orchestrator if not already initialized
+    if st.session_state.orchestrator is None:
+        if st.button("🚀 Connect to Trading System", use_container_width=True, type="primary"):
+            try:
+                config = get_config()
+                use_async = os.getenv("USE_ASYNC_ORCHESTRATOR", "true").lower() == "true"
+                
+                if use_async:
+                    st.session_state.orchestrator = AsyncTradingSystemOrchestrator(config=config)
+                    st.success("✅ Connected to Async Orchestrator")
+                else:
+                    st.session_state.orchestrator = TradingSystemOrchestrator(config=config)
+                    st.success("✅ Connected to Sync Orchestrator")
+                
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to connect: {str(e)}")
+    
+    if st.session_state.orchestrator and st.button("🔄 Refresh Metrics", use_container_width=True):
         st.rerun()
+    
+    if st.session_state.orchestrator and st.button("🔌 Disconnect", use_container_width=True):
+        try:
+            if hasattr(st.session_state.orchestrator, 'stop'):
+                asyncio.run(st.session_state.orchestrator.stop())
+            st.session_state.orchestrator = None
+            st.session_state.metrics = {}
+            st.rerun()
+        except Exception as e:
+            st.warning(f"Error disconnecting: {str(e)}")
     
     st.markdown("---")
     st.header("Circuit Breaker Status")
@@ -245,5 +291,15 @@ if auto_refresh:
 # Footer
 st.markdown("---")
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.caption("💡 Tip: The system runs separately. Start it with `python main.py` to see live metrics here.")
+
+# Info about how metrics work
+if st.session_state.orchestrator:
+    st.info("""
+    ℹ️ **Note:** This dashboard creates its own orchestrator instance to read metrics. 
+    The trading system (`python main.py`) runs separately and writes to the database.
+    Metrics shown here reflect the orchestrator instance in this dashboard session.
+    For complete historical data, check the database directly.
+    """)
+else:
+    st.warning("⚠️ Orchestrator not initialized. Metrics will not be available.")
 
