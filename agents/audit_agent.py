@@ -43,7 +43,7 @@ class AuditAgent(BaseAgent):
         try:
             from anthropic import Anthropic
             self.claude_client = Anthropic(api_key=self.config.anthropic.api_key)
-            self.model = self.config.anthropic.model or "claude-3-opus-20240229"
+            self.model = self.config.anthropic.model or "claude-3-5-sonnet-20241022"
             self.log_info(f"AuditAgent initialized with Claude ({self.model})")
         except Exception as e:
             error = self.handle_error(e, context={"provider": "anthropic"})

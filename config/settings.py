@@ -85,7 +85,7 @@ class LLMConfig:
         return cls(
             provider="anthropic",
             api_key=api_key,
-            model=os.getenv("ANTHROPIC_MODEL", "claude-3-opus-20240229"),
+            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),  # Updated to current model
             max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096"))
         )
     

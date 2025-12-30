@@ -5,9 +5,9 @@ python-dotenv==1.0.0
 
 # API integrations
 alpaca-py==0.21.0          # For paper/live trading
-anthropic==0.18.1          # For Claude API
-openai==1.12.0             # For OpenAI API (if using)
-groq==0.4.2                # For Groq API
+anthropic>=0.75.0          # For Claude API (0.75.0+ fixes httpx compatibility)
+openai>=1.50.0             # For OpenAI API (1.50.0+ fixes httpx compatibility)
+groq>=1.0.0                # For Groq API (1.0.0+ fixes httpx compatibility)
 
 # Data and analysis
 yfinance==0.2.36           # For market data
