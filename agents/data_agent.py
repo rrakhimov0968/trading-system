@@ -298,10 +298,11 @@ class DataAgent(BaseAgent):
             if isinstance(bars_response, tuple):
                 # Alpaca returns tuple: ('data', {'AAPL': [bars...]})
                 if len(bars_response) >= 2:
-                    self.log_debug(f"Alpaca response is tuple with {len(bars_response)} elements")
+                    self.log_info(f"Alpaca response is tuple with {len(bars_response)} elements for {symbol}")
                     response_data = bars_response[1]  # Get the dict from tuple
+                    self.log_info(f"Extracted response_data type: {type(response_data)}, keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}")
                 else:
-                    self.log_warning(f"Unexpected tuple format: {bars_response}")
+                    self.log_warning(f"Unexpected tuple format for {symbol}: {bars_response}")
                     response_data = None
             elif isinstance(bars_response, dict):
                 # Direct dict response
@@ -320,7 +321,7 @@ class DataAgent(BaseAgent):
             if response_data and isinstance(response_data, dict):
                 if symbol in response_data:
                     bar_list = response_data[symbol]
-                    self.log_debug(f"Found {len(bar_list)} bars for {symbol} in response")
+                    self.log_info(f"Found {len(bar_list)} bars for {symbol} in Alpaca response")
                     for bar_item in bar_list:
                         try:
                             bar_data = extract_bar_data(bar_item)
@@ -342,13 +343,19 @@ class DataAgent(BaseAgent):
                             continue
                 else:
                     self.log_warning(
-                        f"Symbol {symbol} not found in Alpaca response. "
+                        f"Symbol {symbol} not found in Alpaca response dict. "
                         f"Available keys: {list(response_data.keys())}"
                     )
             else:
-                self.log_warning(
-                    f"Unexpected Alpaca response type for {symbol}: {type(bars_response)}"
-                )
+                if response_data is None:
+                    self.log_warning(
+                        f"Could not extract response_data for {symbol}. "
+                        f"Original response type: {type(bars_response)}"
+                    )
+                else:
+                    self.log_warning(
+                        f"Response data is not a dict for {symbol}: {type(response_data)}"
+                    )
             
             self.log_info(f"Converted {len(bars)} bars for {symbol} from Alpaca response")
             
