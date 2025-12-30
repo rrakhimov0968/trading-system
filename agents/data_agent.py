@@ -212,10 +212,19 @@ class DataAgent(BaseAgent):
             alpaca_tf = tf_mapping.get(timeframe, TimeFrame.Day)
             
             # Set default dates if not provided
+            # Alpaca API requires timezone-aware dates
+            import pytz
             if not end_date:
-                end_date = datetime.now()
+                end_date = datetime.now(pytz.UTC)
+            elif end_date.tzinfo is None:
+                # Make timezone-aware if not already
+                end_date = pytz.UTC.localize(end_date)
+            
             if not start_date:
                 start_date = end_date - timedelta(days=30)
+            elif start_date.tzinfo is None:
+                # Make timezone-aware if not already
+                start_date = pytz.UTC.localize(start_date)
             
             # Request bars
             request_params = StockBarsRequest(
@@ -244,41 +253,96 @@ class DataAgent(BaseAgent):
             # Convert to our Bar model
             bars = []
             
+            # Helper function to extract bar data from different formats
+            def extract_bar_data(bar_item):
+                """Extract bar data from Alpaca bar object, tuple, or dict."""
+                # Try Bar object with attributes first
+                if hasattr(bar_item, 'timestamp'):
+                    return {
+                        'timestamp': bar_item.timestamp,
+                        'open': float(bar_item.open),
+                        'high': float(bar_item.high),
+                        'low': float(bar_item.low),
+                        'close': float(bar_item.close),
+                        'volume': int(bar_item.volume)
+                    }
+                # Try tuple (timestamp, open, high, low, close, volume, ...)
+                elif isinstance(bar_item, tuple):
+                    if len(bar_item) >= 6:
+                        return {
+                            'timestamp': bar_item[0],
+                            'open': float(bar_item[1]),
+                            'high': float(bar_item[2]),
+                            'low': float(bar_item[3]),
+                            'close': float(bar_item[4]),
+                            'volume': int(bar_item[5])
+                        }
+                    else:
+                        raise ValueError(f"Invalid tuple format for bar: {bar_item}")
+                # Try dict
+                elif isinstance(bar_item, dict):
+                    return {
+                        'timestamp': bar_item.get('timestamp') or bar_item.get('t'),
+                        'open': float(bar_item.get('open') or bar_item.get('o', 0)),
+                        'high': float(bar_item.get('high') or bar_item.get('h', 0)),
+                        'low': float(bar_item.get('low') or bar_item.get('l', 0)),
+                        'close': float(bar_item.get('close') or bar_item.get('c', 0)),
+                        'volume': int(bar_item.get('volume') or bar_item.get('v', 0))
+                    }
+                else:
+                    raise ValueError(f"Unsupported bar format: {type(bar_item)}")
+            
             # Handle different response structures from Alpaca
             if isinstance(bars_response, dict):
                 if symbol in bars_response:
                     bar_list = bars_response[symbol]
                     self.log_debug(f"Found {len(bar_list)} bars for {symbol} in response dict")
-                    for bar in bar_list:
-                        bars.append(Bar(
-                            timestamp=bar.timestamp,
-                            open=float(bar.open),
-                            high=float(bar.high),
-                            low=float(bar.low),
-                            close=float(bar.close),
-                            volume=int(bar.volume),
-                            symbol=symbol,
-                            timeframe=timeframe
-                        ))
+                    for bar_item in bar_list:
+                        try:
+                            bar_data = extract_bar_data(bar_item)
+                            bars.append(Bar(
+                                timestamp=bar_data['timestamp'],
+                                open=bar_data['open'],
+                                high=bar_data['high'],
+                                low=bar_data['low'],
+                                close=bar_data['close'],
+                                volume=bar_data['volume'],
+                                symbol=symbol,
+                                timeframe=timeframe
+                            ))
+                        except Exception as e:
+                            self.log_warning(
+                                f"Failed to parse bar for {symbol}: {e}. "
+                                f"Bar type: {type(bar_item)}, value: {bar_item}"
+                            )
+                            continue
                 else:
                     self.log_warning(
                         f"Symbol {symbol} not found in Alpaca response. "
                         f"Available keys: {list(bars_response.keys())}"
                     )
-            elif hasattr(bars_response, '__iter__'):
+            elif hasattr(bars_response, '__iter__') and not isinstance(bars_response, (str, bytes)):
                 # Handle case where response is iterable directly
                 self.log_debug(f"Alpaca response is iterable, processing bars directly")
-                for bar in bars_response:
-                    bars.append(Bar(
-                        timestamp=bar.timestamp,
-                        open=float(bar.open),
-                        high=float(bar.high),
-                        low=float(bar.low),
-                        close=float(bar.close),
-                        volume=int(bar.volume),
-                        symbol=symbol,
-                        timeframe=timeframe
-                    ))
+                for bar_item in bars_response:
+                    try:
+                        bar_data = extract_bar_data(bar_item)
+                        bars.append(Bar(
+                            timestamp=bar_data['timestamp'],
+                            open=bar_data['open'],
+                            high=bar_data['high'],
+                            low=bar_data['low'],
+                            close=bar_data['close'],
+                            volume=bar_data['volume'],
+                            symbol=symbol,
+                            timeframe=timeframe
+                        ))
+                    except Exception as e:
+                        self.log_warning(
+                            f"Failed to parse bar for {symbol}: {e}. "
+                            f"Bar type: {type(bar_item)}, value: {bar_item}"
+                        )
+                        continue
             else:
                 self.log_warning(
                     f"Unexpected Alpaca response type for {symbol}: {type(bars_response)}"
