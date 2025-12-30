@@ -201,6 +201,57 @@ class StrategyAgent(BaseAgent):
         self.log_debug(f"Market context for {symbol}", context=context)
         return context
     
+    def _deterministic_fallback(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Smart fallback strategy selection based on market conditions when LLM fails.
+        
+        Args:
+            symbol: Stock symbol
+            context: Market context metrics
+        
+        Returns:
+            Dictionary with selected strategy and reasoning
+        """
+        volatility = context.get("volatility", 0.0) / 100.0  # Convert percentage to decimal
+        trend_strength = abs(context.get("price_change_pct", 0.0)) / 100.0  # Use absolute price change as trend strength
+        trend_direction = context.get("price_change_pct", 0.0)
+        
+        self.log_warning(f"Using deterministic fallback for {symbol} (volatility={volatility:.4f}, trend_strength={trend_strength:.4f})")
+        
+        # High volatility -> Use mean reversion with caution
+        if volatility > 0.03:  # 3% volatility threshold
+            return {
+                "strategy_name": "MeanReversion",
+                "action": "HOLD",
+                "confidence": 0.4,
+                "reasoning": f"High volatility ({volatility:.2%}) - cautious hold with mean reversion strategy"
+            }
+        
+        # Strong trend -> Use trend following
+        elif trend_strength > 0.07:  # 7% price change indicates strong trend
+            if trend_direction > 0:
+                action = "BUY"
+            elif trend_direction < 0:
+                action = "SELL"
+            else:
+                action = "HOLD"
+            
+            return {
+                "strategy_name": "MovingAverageCrossover",
+                "action": action,
+                "confidence": 0.6,
+                "reasoning": f"Strong trend detected (change={trend_direction:.2%}) - trend following fallback"
+            }
+        
+        # Neutral market -> Use mean reversion with hold
+        else:
+            return {
+                "strategy_name": "MeanReversion",
+                "action": "HOLD",
+                "confidence": 0.5,
+                "reasoning": f"Neutral market conditions - mean reversion hold (volatility={volatility:.2%}, trend_change={trend_direction:.2%})"
+            }
+    
     @retry_with_backoff(config=RetryConfig(max_attempts=3, initial_delay=1.0))
     def _select_strategy_with_llm(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -340,13 +391,8 @@ IMPORTANT:
             }
         except Exception as e:
             self.log_exception(f"LLM strategy selection failed for {symbol}", e)
-            # Fallback to default strategy
-            return {
-                "strategy_name": "MovingAverageCrossover",
-                "action": "HOLD",
-                "confidence": 0.3,
-                "reasoning": f"LLM selection failed, using default strategy. Error: {str(e)}"
-            }
+            # Smart fallback based on actual market conditions
+            return self._deterministic_fallback(symbol, context)
     
     def _generate_signal(
         self,

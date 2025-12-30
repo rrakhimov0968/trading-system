@@ -222,7 +222,16 @@ class DataAgent(BaseAgent):
                         timeframe=timeframe
                     ))
             
-            return MarketData(symbol=symbol, bars=bars)
+            market_data = MarketData(symbol=symbol, bars=bars)
+            
+            # Validate data quality before returning
+            if not self._validate_market_data(market_data, symbol):
+                raise AgentError(
+                    f"Data validation failed for {symbol}",
+                    correlation_id=self._correlation_id
+                )
+            
+            return market_data
             
         except AlpacaAPIError as e:
             self.log_exception(f"Alpaca API error fetching data for {symbol}", e)
@@ -325,6 +334,13 @@ class DataAgent(BaseAgent):
             # Create MarketData with both bars and DataFrame
             market_data = MarketData(symbol=symbol, bars=bars, dataframe=df)
             
+            # Validate data quality before returning
+            if not self._validate_market_data(market_data, symbol):
+                raise AgentError(
+                    f"Data validation failed for {symbol}",
+                    correlation_id=self._correlation_id
+                )
+            
             return market_data
             
         except Exception as e:
@@ -358,6 +374,91 @@ class DataAgent(BaseAgent):
             # Remove oldest entry
             oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
             del self._cache[oldest_key]
+    
+    def _validate_market_data(self, data: MarketData, symbol: str) -> bool:
+        """
+        Validate data quality before passing to strategies.
+        
+        Args:
+            data: MarketData to validate
+            symbol: Stock symbol for logging
+        
+        Returns:
+            True if data is valid, False otherwise
+        """
+        from datetime import timedelta
+        import pytz
+        
+        # Check for sufficient data
+        if not data.bars or len(data.bars) < 20:
+            self.log_warning(
+                f"Insufficient data for {symbol}: "
+                f"{len(data.bars) if data.bars else 0} bars (minimum 20 required)"
+            )
+            return False
+        
+        latest_bar = data.bars[-1]
+        
+        # Check for stale data (more than 10 minutes old for intraday, or 1 day for daily)
+        # For daily data, allow up to 2 days old (weekend/holiday tolerance)
+        now = datetime.now(pytz.UTC) if latest_bar.timestamp.tzinfo else datetime.utcnow()
+        
+        # Determine max age based on timeframe
+        if hasattr(latest_bar, 'timeframe') and latest_bar.timeframe:
+            if 'Day' in latest_bar.timeframe or 'D' in latest_bar.timeframe:
+                max_age = timedelta(days=2)  # Daily data - 2 days tolerance
+            else:
+                max_age = timedelta(minutes=10)  # Intraday - 10 minutes
+        else:
+            # Default to 1 day if timeframe not specified
+            max_age = timedelta(days=1)
+        
+        bar_time = latest_bar.timestamp
+        if bar_time.tzinfo:
+            bar_time_utc = bar_time.astimezone(pytz.UTC)
+        else:
+            bar_time_utc = pytz.UTC.localize(bar_time)
+        
+        age = now - bar_time_utc
+        if age > max_age:
+            self.log_warning(
+                f"Stale data for {symbol}: latest bar is {age.total_seconds() / 3600:.1f} hours old "
+                f"(max allowed: {max_age.total_seconds() / 3600:.1f} hours)"
+            )
+            return False
+        
+        # Check for anomalous values
+        if latest_bar.volume <= 0:
+            self.log_warning(f"Invalid volume for {symbol}: {latest_bar.volume}")
+            return False
+        
+        if latest_bar.close <= 0:
+            self.log_warning(f"Invalid close price for {symbol}: {latest_bar.close}")
+            return False
+        
+        # Check for reasonable OHLC relationships
+        if latest_bar.high < latest_bar.low:
+            self.log_warning(
+                f"Invalid OHLC for {symbol}: high ({latest_bar.high}) < low ({latest_bar.low})"
+            )
+            return False
+        
+        if latest_bar.close > latest_bar.high or latest_bar.close < latest_bar.low:
+            self.log_warning(
+                f"Invalid close price for {symbol}: close ({latest_bar.close}) "
+                f"outside high-low range [{latest_bar.low}, {latest_bar.high}]"
+            )
+            return False
+        
+        if latest_bar.open > latest_bar.high or latest_bar.open < latest_bar.low:
+            self.log_warning(
+                f"Invalid open price for {symbol}: open ({latest_bar.open}) "
+                f"outside high-low range [{latest_bar.low}, {latest_bar.high}]"
+            )
+            return False
+        
+        self.log_debug(f"Data validation passed for {symbol}: {len(data.bars)} bars, latest at {latest_bar.timestamp}")
+        return True
     
     def get_latest_quote(self, symbol: str) -> Optional[Quote]:
         """
@@ -488,6 +589,20 @@ class DataAgent(BaseAgent):
             else:
                 raise AgentError(
                     f"Unsupported data provider: {self.provider}",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Validate data quality before caching and returning
+            if not self._validate_market_data(market_data, validated_symbol):
+                raise AgentError(
+                    f"Data validation failed for {validated_symbol}",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Validate data quality before caching and returning
+            if not self._validate_market_data(market_data, validated_symbol):
+                raise AgentError(
+                    f"Data validation failed for {validated_symbol}",
                     correlation_id=self._correlation_id
                 )
             

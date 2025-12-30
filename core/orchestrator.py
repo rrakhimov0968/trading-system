@@ -44,6 +44,10 @@ class TradingSystemOrchestrator:
         self.running = False
         self.iteration = 0
         
+        # Memory management for signals history (prevent unbounded growth)
+        self.all_signals: list = []
+        self.MAX_SIGNALS_STORED = 1000  # Keep only last 1000 signals
+        
         # Initialize agents
         logger.info("Initializing agents...")
         try:
@@ -137,6 +141,20 @@ class TradingSystemOrchestrator:
         
         return all_healthy
     
+    def _cleanup_old_signals(self) -> None:
+        """Prevent memory buildup by removing old signals."""
+        if len(self.all_signals) > self.MAX_SIGNALS_STORED:
+            # Remove oldest 10% or enough to get under limit
+            remove_count = max(
+                len(self.all_signals) - self.MAX_SIGNALS_STORED,
+                len(self.all_signals) // 10
+            )
+            self.all_signals = self.all_signals[remove_count:]
+            logger.debug(
+                f"Cleaned up {remove_count} old signals "
+                f"(kept {len(self.all_signals)}/{self.MAX_SIGNALS_STORED} max)"
+            )
+    
     def _run_iteration(self) -> None:
         """Run a single iteration of the trading loop."""
         self.iteration += 1
@@ -179,6 +197,9 @@ class TradingSystemOrchestrator:
             signals = []
             execution_results = []
             executed_count = 0
+            
+            # Cleanup old signals to prevent memory buildup
+            self._cleanup_old_signals()
             
             # Step 2: Strategy Agent evaluates data and generates signals
             logger.info("Step 2: Evaluating market data and generating signals...")
@@ -323,6 +344,11 @@ class TradingSystemOrchestrator:
             except Exception as e:
                 logger.error(f"AuditAgent failed: {e}", exc_info=True)
                 # Continue - audit failure shouldn't stop the system
+            
+            # Store signals for potential analysis (with cleanup)
+            if signals:
+                self.all_signals.extend(signals)
+                self._cleanup_old_signals()
             
             logger.info(f"Iteration {self.iteration} completed in {iteration_duration:.2f} seconds")
             
