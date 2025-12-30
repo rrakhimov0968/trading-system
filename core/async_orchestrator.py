@@ -440,7 +440,8 @@ class AsyncTradingSystemOrchestrator:
                 # Check market hours - if closed, sleep longer
                 if not is_market_open():
                     status_msg = get_market_status_message()
-                    logger.debug(f"Market is closed. {status_msg}")
+                    logger.info(f"Market is closed. {status_msg}")
+                    logger.info("Sleeping for 5 minutes until next check...")
                     # Sleep 5 minutes instead of 60 seconds when market is closed
                     await asyncio.sleep(300)
                     continue
