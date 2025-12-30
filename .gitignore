@@ -36,3 +36,10 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Backup files
+*.bak
+*~
+
+# Python version management
+.python-version
