@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch, MagicMock
 from agents.audit_agent import AuditAgent
 from models.audit import IterationSummary, ExecutionResult, AuditReport
 from models.signal import TradingSignal, SignalAction
-from config.settings import AppConfig, AnthropicConfig
+from config.settings import AppConfig, LLMConfig
 from utils.exceptions import AgentError
 
 
@@ -14,7 +14,8 @@ from utils.exceptions import AgentError
 def mock_config():
     """Create a mock config with Anthropic settings."""
     config = Mock(spec=AppConfig)
-    config.anthropic = AnthropicConfig(
+    config.anthropic = LLMConfig(
+        provider="anthropic",
         api_key="test-key",
         model="claude-3-opus-20240229"
     )
@@ -87,7 +88,7 @@ class TestAuditAgentInitialization:
     def test_init_with_default_model(self, mock_anthropic):
         """Test initialization with default model."""
         config = Mock(spec=AppConfig)
-        config.anthropic = AnthropicConfig(api_key="test-key", model=None)
+        config.anthropic = LLMConfig(provider="anthropic", api_key="test-key", model=None)
         
         mock_client = Mock()
         mock_anthropic.return_value = mock_client

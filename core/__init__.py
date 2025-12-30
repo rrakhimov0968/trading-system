@@ -1,5 +1,6 @@
 """Core orchestration components."""
-from core.orchestrator import TradingSystemOrchestrator
+# Note: TradingSystemOrchestrator is imported directly from core.orchestrator
+# to avoid circular imports. Do not import it here.
 
-__all__ = ["TradingSystemOrchestrator"]
+__all__ = []
 
