@@ -246,7 +246,7 @@ class DataAgent(BaseAgent):
             self.log_debug(
                 f"Alpaca response for {symbol}: "
                 f"type={type(bars_response)}, "
-                f"keys={list(bars_response.keys()) if hasattr(bars_response, 'keys') else 'N/A'}, "
+                f"is_tuple={isinstance(bars_response, tuple)}, "
                 f"is_dict={isinstance(bars_response, dict)}"
             )
             
@@ -266,6 +266,16 @@ class DataAgent(BaseAgent):
                         'close': float(bar_item.close),
                         'volume': int(bar_item.volume)
                     }
+                # Try dict (most common format from Alpaca)
+                elif isinstance(bar_item, dict):
+                    return {
+                        'timestamp': bar_item.get('timestamp') or bar_item.get('t'),
+                        'open': float(bar_item.get('open') or bar_item.get('o', 0)),
+                        'high': float(bar_item.get('high') or bar_item.get('h', 0)),
+                        'low': float(bar_item.get('low') or bar_item.get('l', 0)),
+                        'close': float(bar_item.get('close') or bar_item.get('c', 0)),
+                        'volume': int(bar_item.get('volume') or bar_item.get('v', 0))
+                    }
                 # Try tuple (timestamp, open, high, low, close, volume, ...)
                 elif isinstance(bar_item, tuple):
                     if len(bar_item) >= 6:
@@ -279,24 +289,38 @@ class DataAgent(BaseAgent):
                         }
                     else:
                         raise ValueError(f"Invalid tuple format for bar: {bar_item}")
-                # Try dict
-                elif isinstance(bar_item, dict):
-                    return {
-                        'timestamp': bar_item.get('timestamp') or bar_item.get('t'),
-                        'open': float(bar_item.get('open') or bar_item.get('o', 0)),
-                        'high': float(bar_item.get('high') or bar_item.get('h', 0)),
-                        'low': float(bar_item.get('low') or bar_item.get('l', 0)),
-                        'close': float(bar_item.get('close') or bar_item.get('c', 0)),
-                        'volume': int(bar_item.get('volume') or bar_item.get('v', 0))
-                    }
                 else:
                     raise ValueError(f"Unsupported bar format: {type(bar_item)}")
             
-            # Handle different response structures from Alpaca
-            if isinstance(bars_response, dict):
-                if symbol in bars_response:
-                    bar_list = bars_response[symbol]
-                    self.log_debug(f"Found {len(bar_list)} bars for {symbol} in response dict")
+            # Handle Alpaca response structure: can be tuple ('data', {...}) or dict directly
+            response_data = None
+            
+            if isinstance(bars_response, tuple):
+                # Alpaca returns tuple: ('data', {'AAPL': [bars...]})
+                if len(bars_response) >= 2:
+                    self.log_debug(f"Alpaca response is tuple with {len(bars_response)} elements")
+                    response_data = bars_response[1]  # Get the dict from tuple
+                else:
+                    self.log_warning(f"Unexpected tuple format: {bars_response}")
+                    response_data = None
+            elif isinstance(bars_response, dict):
+                # Direct dict response
+                response_data = bars_response
+            else:
+                # Try to convert or access as dict
+                if hasattr(bars_response, '__dict__'):
+                    response_data = bars_response.__dict__
+                elif hasattr(bars_response, 'data'):
+                    response_data = bars_response.data
+                else:
+                    self.log_warning(f"Unexpected response format: {type(bars_response)}")
+                    response_data = None
+            
+            # Extract bars from response data
+            if response_data and isinstance(response_data, dict):
+                if symbol in response_data:
+                    bar_list = response_data[symbol]
+                    self.log_debug(f"Found {len(bar_list)} bars for {symbol} in response")
                     for bar_item in bar_list:
                         try:
                             bar_data = extract_bar_data(bar_item)
@@ -313,36 +337,14 @@ class DataAgent(BaseAgent):
                         except Exception as e:
                             self.log_warning(
                                 f"Failed to parse bar for {symbol}: {e}. "
-                                f"Bar type: {type(bar_item)}, value: {bar_item}"
+                                f"Bar type: {type(bar_item)}"
                             )
                             continue
                 else:
                     self.log_warning(
                         f"Symbol {symbol} not found in Alpaca response. "
-                        f"Available keys: {list(bars_response.keys())}"
+                        f"Available keys: {list(response_data.keys())}"
                     )
-            elif hasattr(bars_response, '__iter__') and not isinstance(bars_response, (str, bytes)):
-                # Handle case where response is iterable directly
-                self.log_debug(f"Alpaca response is iterable, processing bars directly")
-                for bar_item in bars_response:
-                    try:
-                        bar_data = extract_bar_data(bar_item)
-                        bars.append(Bar(
-                            timestamp=bar_data['timestamp'],
-                            open=bar_data['open'],
-                            high=bar_data['high'],
-                            low=bar_data['low'],
-                            close=bar_data['close'],
-                            volume=bar_data['volume'],
-                            symbol=symbol,
-                            timeframe=timeframe
-                        ))
-                    except Exception as e:
-                        self.log_warning(
-                            f"Failed to parse bar for {symbol}: {e}. "
-                            f"Bar type: {type(bar_item)}, value: {bar_item}"
-                        )
-                        continue
             else:
                 self.log_warning(
                     f"Unexpected Alpaca response type for {symbol}: {type(bars_response)}"
