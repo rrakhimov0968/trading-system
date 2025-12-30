@@ -322,13 +322,27 @@ class DataAgent(BaseAgent):
                 else:
                     start_date = end_date - timedelta(days=5)
             
-            # Fetch data
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(
-                start=start_date,
-                end=end_date,
-                interval=yf_interval
-            )
+            # Fetch data with error handling for Yahoo Finance API issues
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(
+                    start=start_date,
+                    end=end_date,
+                    interval=yf_interval,
+                    timeout=10  # 10 second timeout
+                )
+            except Exception as yf_error:
+                error_msg = str(yf_error)
+                # Handle common yfinance errors
+                if "Expecting value" in error_msg or "No timezone found" in error_msg:
+                    self.log_warning(
+                        f"Yahoo Finance API error for {symbol}: {error_msg}. "
+                        "This may be temporary (rate limiting or service issue)."
+                    )
+                else:
+                    self.log_warning(f"Yahoo Finance error for {symbol}: {error_msg}")
+                # Return empty MarketData instead of raising error
+                return MarketData(symbol=symbol, bars=[])
             
             if df.empty:
                 self.log_warning(f"No data returned from Yahoo Finance for {symbol}")
