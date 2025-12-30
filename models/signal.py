@@ -30,6 +30,9 @@ class TradingSignal:
     take_profit: Optional[float] = None
     reasoning: Optional[str] = None  # LLM reasoning for the signal
     historical_data: Optional[pd.DataFrame] = field(default=None, repr=False)  # Historical data for validation
+    qty: Optional[int] = None  # Calculated position size (in shares)
+    risk_amount: Optional[float] = None  # Risk per trade in dollars
+    approved: bool = False  # Whether signal passed risk checks
     
     def to_dict(self) -> dict:
         """Convert signal to dictionary."""
@@ -42,6 +45,9 @@ class TradingSignal:
             "price": self.price,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
-            "reasoning": self.reasoning
+            "reasoning": self.reasoning,
+            "qty": self.qty,
+            "risk_amount": self.risk_amount,
+            "approved": self.approved
         }
 

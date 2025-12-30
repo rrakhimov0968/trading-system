@@ -11,6 +11,7 @@ from agents.data_agent import DataAgent
 from agents.execution_agent import ExecutionAgent
 from agents.strategy_agent import StrategyAgent
 from agents.quant_agent import QuantAgent
+from agents.risk_agent import RiskAgent
 from utils.exceptions import TradingSystemError
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ class TradingSystemOrchestrator:
     1. DataAgent fetches market data
     2. Strategy Agent evaluates data and generates signals ✅
     3. Quant Agent validates signals and adjusts confidence ✅
-    4. Risk Agent validates trades (future)
+    4. Risk Agent validates trades and calculates position sizing ✅
     5. Execution Agent executes approved trades (future)
     6. Audit Agent logs and reports (future)
     """
@@ -46,9 +47,9 @@ class TradingSystemOrchestrator:
             self.data_agent = DataAgent(config=config)
             self.strategy_agent = StrategyAgent(config=config)
             self.quant_agent = QuantAgent(config=config)
+            self.risk_agent = RiskAgent(config=config)
             self.execution_agent = ExecutionAgent(config=config)
             # TODO: Initialize other agents as they're implemented
-            # self.risk_agent = RiskAgent(config=config)
             # self.audit_agent = AuditAgent(config=config)
             
             logger.info("All agents initialized successfully")
@@ -118,6 +119,7 @@ class TradingSystemOrchestrator:
             "DataAgent": self.data_agent.health_check(),
             "StrategyAgent": self.strategy_agent.health_check(),
             "QuantAgent": self.quant_agent.health_check(),
+            "RiskAgent": self.risk_agent.health_check(),
             "ExecutionAgent": self.execution_agent.health_check(),
         }
         
@@ -210,22 +212,71 @@ class TradingSystemOrchestrator:
                     logger.warning("Continuing with unvalidated signals due to QuantAgent failure")
                     # Continue with original signals
             
-            # Step 4: Risk Agent would validate trades
-            # TODO: Implement Risk Agent
-            # try:
-            #     approved_trades = self.risk_agent.process(analysis)
-            # except Exception as e:
-            #     logger.error(f"RiskAgent failed: {e}", exc_info=True)
-            #     approved_trades = []
+            # Step 4: Risk Agent validates trades and calculates position sizing
+            if signals:
+                logger.info("Step 4: Risk validation and position sizing...")
+                try:
+                    approved_signals = self.risk_agent.process(signals, execution_agent=self.execution_agent)
+                    
+                    # Log approved vs rejected
+                    approved = [s for s in approved_signals if s.approved]
+                    rejected = [s for s in approved_signals if not s.approved]
+                    
+                    if approved:
+                        logger.info(f"Approved {len(approved)} signals with position sizing:")
+                        for signal in approved:
+                            logger.info(
+                                f"  {signal.symbol}: {signal.action.value} {signal.qty} shares, "
+                                f"risk=${signal.risk_amount:.2f}, stop_loss=${signal.stop_loss:.2f if signal.stop_loss else 'N/A'}"
+                            )
+                    
+                    if rejected:
+                        logger.warning(f"Rejected {len(rejected)} signals due to risk violations")
+                        for signal in rejected:
+                            logger.warning(f"  {signal.symbol}: Risk check failed")
+                    
+                    # Filter to only approved signals
+                    signals = [s for s in approved_signals if s.approved]
+                    logger.info(f"Risk validation completed: {len(signals)} approved, {len(rejected)} rejected")
+                except Exception as e:
+                    logger.error(f"RiskAgent failed: {e}", exc_info=True)
+                    logger.warning("Continuing with unvalidated signals due to RiskAgent failure")
+                    # Continue with signals (but mark as not approved)
+                    for signal in signals:
+                        signal.approved = False
             
-            # Step 5: Execution Agent would execute approved trades
-            # TODO: Implement full execution flow
-            # for trade in approved_trades:
-            #     try:
-            #         self.execution_agent.process(trade)
-            #     except Exception as e:
-            #         logger.error(f"ExecutionAgent failed for trade {trade}: {e}", exc_info=True)
-            #         # Continue with next trade
+            # Step 5: Execution Agent executes approved trades
+            if signals:
+                logger.info("Step 5: Executing approved trades...")
+                executed_count = 0
+                for signal in signals:
+                    if signal.action == SignalAction.HOLD:
+                        continue  # Skip HOLD signals
+                    
+                    try:
+                        order_request = {
+                            "symbol": signal.symbol,
+                            "quantity": signal.qty or 1,
+                            "side": signal.action.value.lower(),
+                            "order_type": "market"
+                        }
+                        
+                        result = self.execution_agent.process(order_request)
+                        executed_count += 1
+                        logger.info(
+                            f"Order executed for {signal.symbol}: {result.get('order_id', 'N/A')}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"ExecutionAgent failed for {signal.symbol}: {e}",
+                            exc_info=True
+                        )
+                        # Continue with next trade
+                
+                if executed_count == 0:
+                    logger.info("No trades executed (all signals were HOLD or execution failed)")
+            else:
+                logger.info("No approved signals to execute")
             
             # Step 6: Audit Agent would log and report
             # TODO: Implement Audit Agent

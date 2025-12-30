@@ -200,6 +200,13 @@ class AppConfig:
     quant_max_drawdown: float = 0.08  # Maximum drawdown threshold (8%)
     quant_max_vif: float = 10.0  # Maximum VIF for multicollinearity check
     quant_use_llm: bool = False  # Enable LLM review for quant analysis
+    # Risk agent settings
+    risk_max_per_trade: float = 0.02  # Maximum risk per trade (2%)
+    risk_max_daily_loss: float = 0.05  # Maximum daily loss (5%)
+    risk_min_confidence: float = 0.3  # Minimum confidence to approve signal
+    risk_max_qty: int = 1000  # Maximum shares per trade
+    risk_default_account_balance: float = 10000.0  # Default if can't fetch from broker
+    risk_use_llm_advisor: bool = False  # Enable LLM advisor for explanations
     
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -236,7 +243,13 @@ class AppConfig:
             quant_min_sharpe=float(os.getenv("QUANT_MIN_SHARPE", "1.5")),
             quant_max_drawdown=float(os.getenv("QUANT_MAX_DRAWDOWN", "0.08")),
             quant_max_vif=float(os.getenv("QUANT_MAX_VIF", "10.0")),
-            quant_use_llm=os.getenv("QUANT_USE_LLM", "false").lower() == "true"
+            quant_use_llm=os.getenv("QUANT_USE_LLM", "false").lower() == "true",
+            risk_max_per_trade=float(os.getenv("RISK_MAX_PER_TRADE", "0.02")),
+            risk_max_daily_loss=float(os.getenv("RISK_MAX_DAILY_LOSS", "0.05")),
+            risk_min_confidence=float(os.getenv("RISK_MIN_CONFIDENCE", "0.3")),
+            risk_max_qty=int(os.getenv("RISK_MAX_QTY", "1000")),
+            risk_default_account_balance=float(os.getenv("RISK_DEFAULT_ACCOUNT_BALANCE", "10000.0")),
+            risk_use_llm_advisor=os.getenv("RISK_USE_LLM_ADVISOR", "false").lower() == "true"
         )
 
 
