@@ -199,15 +199,17 @@ class TestSignalGeneration:
         
         mock_config.groq = LLMConfig(provider="groq", api_key="test")
         
-        # Create mock market data
+        # Create mock market data (need at least 200 bars for some strategies)
+        from datetime import timedelta
         bars = []
-        for i in range(25):
+        start_date = datetime(2024, 1, 1)
+        for i in range(250):
             bars.append(Bar(
-                timestamp=datetime(2024, 1, 1 + i),
-                open=100.0 + i,
-                high=102.0 + i,
-                low=99.0 + i,
-                close=101.0 + i,
+                timestamp=start_date + timedelta(days=i),
+                open=100.0 + i * 0.1,
+                high=102.0 + i * 0.1,
+                low=99.0 + i * 0.1,
+                close=101.0 + i * 0.1,
                 volume=1000000,
                 symbol="AAPL"
             ))
@@ -264,26 +266,28 @@ class TestSignalGeneration:
         
         mock_config.groq = LLMConfig(provider="groq", api_key="test")
         
-        # Create market data for multiple symbols
+        # Create market data for multiple symbols (need at least 200 bars)
+        from datetime import timedelta
+        start_date = datetime(2024, 1, 1)
         bars_aapl = [Bar(
-            timestamp=datetime(2024, 1, 1 + i),
-            open=100.0 + i,
-            high=102.0 + i,
-            low=99.0 + i,
-            close=101.0 + i,
+            timestamp=start_date + timedelta(days=i),
+            open=100.0 + i * 0.1,
+            high=102.0 + i * 0.1,
+            low=99.0 + i * 0.1,
+            close=101.0 + i * 0.1,
             volume=1000000,
             symbol="AAPL"
-        ) for i in range(25)]
+        ) for i in range(250)]
         
         bars_msft = [Bar(
-            timestamp=datetime(2024, 1, 1 + i),
-            open=200.0 + i,
-            high=202.0 + i,
-            low=199.0 + i,
-            close=201.0 + i,
+            timestamp=start_date + timedelta(days=i),
+            open=200.0 + i * 0.1,
+            high=202.0 + i * 0.1,
+            low=199.0 + i * 0.1,
+            close=201.0 + i * 0.1,
             volume=2000000,
             symbol="MSFT"
-        ) for i in range(25)]
+        ) for i in range(250)]
         
         market_data = {
             "AAPL": MarketData(symbol="AAPL", bars=bars_aapl),

@@ -119,6 +119,7 @@ class RiskAgent(BaseAgent):
                 # Skip HOLD signals
                 if signal.action == SignalAction.HOLD:
                     self.log_debug(f"Skipping HOLD signal for {signal.symbol}")
+                    signal.approved = True  # HOLD signals are automatically approved
                     approved_signals.append(signal)
                     continue
                 
@@ -217,6 +218,14 @@ class RiskAgent(BaseAgent):
         Raises:
             RiskCheckError: If sizing violates risk rules
         """
+        # Check confidence before sizing (also checked in enforce_rules, but good to check here too)
+        if signal.confidence < self.min_confidence:
+            raise RiskCheckError(
+                f"Confidence {signal.confidence:.2f} below minimum {self.min_confidence}",
+                correlation_id=self._correlation_id,
+                details={"confidence": signal.confidence, "min_confidence": self.min_confidence}
+            )
+        
         if signal.historical_data is None or signal.historical_data.empty:
             raise RiskCheckError(
                 "No historical data for position sizing",

@@ -87,7 +87,7 @@ class QuantAgent(BaseAgent):
                 # Get historical data if available
                 if market_data and signal.symbol in market_data:
                     signal.historical_data = market_data[signal.symbol].to_dataframe()
-                elif not signal.historical_data:
+                elif signal.historical_data is None or (hasattr(signal.historical_data, 'empty') and signal.historical_data.empty):
                     self.log_warning(
                         f"No historical data available for {signal.symbol}, "
                         "skipping quantitative validation"

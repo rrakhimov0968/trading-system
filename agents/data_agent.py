@@ -7,6 +7,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockQuotesRequest, StockTradesRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.common.exceptions import APIError as AlpacaAPIError
+import asyncio
+import aiohttp
+from asyncio import Queue
 
 from agents.base import BaseAgent
 from models.market_data import MarketData, Bar, Quote, Trade
@@ -42,6 +45,10 @@ class DataAgent(BaseAgent):
         
         self.provider = self.data_config.provider
         self._cache: Dict[str, tuple] = {}  # Simple in-memory cache: {key: (data, timestamp)}
+        
+        # Async session for HTTP requests (initialized lazily)
+        self._async_session: Optional[aiohttp.ClientSession] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         
         # Initialize provider-specific clients
         if self.provider == DataProvider.ALPACA:
@@ -385,6 +392,227 @@ class DataAgent(BaseAgent):
         # For now, return None
         return None
     
+    # ========================================================================
+    # Async Methods
+    # ========================================================================
+    
+    async def _get_async_session(self) -> aiohttp.ClientSession:
+        """Get or create async HTTP session."""
+        if self._async_session is None or self._async_session.closed:
+            self._async_session = aiohttp.ClientSession()
+        return self._async_session
+    
+    async def _get_event_loop(self) -> asyncio.AbstractEventLoop:
+        """Get current event loop."""
+        try:
+            # Try to get the running loop first (Python 3.7+)
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, get the current event loop
+            return asyncio.get_event_loop()
+    
+    async def cleanup_async_resources(self) -> None:
+        """Clean up async resources."""
+        if self._async_session and not self._async_session.closed:
+            await self._async_session.close()
+            self._async_session = None
+    
+    async def fetch_data_async(
+        self,
+        symbol: str,
+        timeframe: str = "1Day",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 100
+    ) -> MarketData:
+        """
+        Fetch market data asynchronously for a single symbol.
+        
+        Args:
+            symbol: Stock symbol
+            timeframe: Bar timeframe
+            start_date: Start date for historical data
+            end_date: End date for historical data
+            limit: Maximum number of bars to return
+        
+        Returns:
+            MarketData object
+        
+        Raises:
+            AgentError: If data fetching fails
+        """
+        try:
+            validated_symbol = validate_symbol(symbol)
+            
+            # Check cache first
+            cache_key = f"{validated_symbol}_{timeframe}_{limit}"
+            cached_data = self._get_from_cache(cache_key)
+            if cached_data:
+                self.log_debug(f"Using cached data for {validated_symbol}")
+                return cached_data
+            
+            # Fetch data using async wrapper around sync methods
+            # Since yfinance and Alpaca clients are sync, we wrap them in executor
+            loop = await self._get_event_loop()
+            
+            if self.provider == DataProvider.ALPACA:
+                market_data = await loop.run_in_executor(
+                    None,
+                    self._fetch_alpaca_data,
+                    validated_symbol,
+                    timeframe,
+                    start_date,
+                    end_date,
+                    limit
+                )
+            elif self.provider == DataProvider.POLYGON:
+                market_data = await loop.run_in_executor(
+                    None,
+                    self._fetch_polygon_data,
+                    validated_symbol,
+                    timeframe,
+                    start_date,
+                    end_date,
+                    limit
+                )
+            elif self.provider == DataProvider.YAHOO:
+                market_data = await loop.run_in_executor(
+                    None,
+                    self._fetch_yahoo_data,
+                    validated_symbol,
+                    timeframe,
+                    start_date,
+                    end_date,
+                    limit
+                )
+            else:
+                raise AgentError(
+                    f"Unsupported data provider: {self.provider}",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Cache the result
+            self._cache_data(cache_key, market_data)
+            
+            return market_data
+            
+        except Exception as e:
+            self.log_exception(f"Async fetch failed for {symbol}", e)
+            raise AgentError(
+                f"Async fetch failed for {symbol}: {str(e)}",
+                correlation_id=self._correlation_id
+            ) from e
+    
+    async def process_async(
+        self,
+        symbols: List[str],
+        timeframe: str = "1Day",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 100
+    ) -> Dict[str, MarketData]:
+        """
+        Fetch market data asynchronously for multiple symbols in parallel.
+        
+        This method uses asyncio.gather to fetch multiple symbols concurrently,
+        which is much faster than sequential fetching.
+        
+        Args:
+            symbols: List of stock symbols
+            timeframe: Bar timeframe
+            start_date: Start date for historical data
+            end_date: End date for historical data
+            limit: Maximum number of bars to return
+        
+        Returns:
+            Dictionary mapping symbol to MarketData
+        """
+        self.generate_correlation_id()
+        self.log_info(
+            f"Fetching market data asynchronously for {len(symbols)} symbols",
+            symbols=symbols,
+            timeframe=timeframe,
+            provider=self.provider.value
+        )
+        
+        # Create async tasks for all symbols
+        tasks = [
+            self.fetch_data_async(symbol, timeframe, start_date, end_date, limit)
+            for symbol in symbols
+        ]
+        
+        # Fetch all symbols concurrently
+        try:
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            results = {}
+            for symbol, result in zip(symbols, results_list):
+                if isinstance(result, Exception):
+                    self.log_exception(f"Failed to fetch data for {symbol}", result)
+                    continue
+                results[symbol] = result
+            
+            self.log_info(
+                f"Successfully fetched data for {len(results)}/{len(symbols)} symbols asynchronously",
+                successful_symbols=list(results.keys())
+            )
+            
+            return results
+            
+        except Exception as e:
+            self.log_exception("Error in async data fetching", e)
+            raise AgentError(
+                f"Async data fetching failed: {str(e)}",
+                correlation_id=self._correlation_id
+            ) from e
+    
+    async def process_queue(
+        self,
+        symbols: List[str],
+        timeframe: str = "1Day",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 100,
+        queue: Optional[Queue] = None
+    ) -> Queue:
+        """
+        Fetch data for multiple symbols and put results in a queue.
+        
+        This method is useful for producer-consumer patterns where you want
+        to process data as it becomes available rather than waiting for all.
+        
+        Args:
+            symbols: List of stock symbols
+            timeframe: Bar timeframe
+            start_date: Start date for historical data
+            end_date: End date for historical data
+            limit: Maximum number of bars to return
+            queue: Optional asyncio Queue to use (creates new one if not provided)
+        
+        Returns:
+            Queue containing (symbol, MarketData) tuples
+        """
+        if queue is None:
+            queue = Queue()
+        
+        async def fetch_and_queue(symbol: str):
+            """Fetch data for a symbol and add to queue."""
+            try:
+                data = await self.fetch_data_async(symbol, timeframe, start_date, end_date, limit)
+                await queue.put((symbol, data))
+            except Exception as e:
+                self.log_exception(f"Failed to fetch and queue data for {symbol}", e)
+                await queue.put((symbol, None))  # Put None to indicate failure
+        
+        # Create tasks for all symbols
+        tasks = [fetch_and_queue(symbol) for symbol in symbols]
+        
+        # Wait for all tasks to complete
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        return queue
+    
     def health_check(self) -> Dict[str, Any]:
         """Check agent health by attempting to fetch data."""
         health = super().health_check()
@@ -413,4 +641,33 @@ class DataAgent(BaseAgent):
             })
         
         return health
+    
+    def __del__(self):
+        """Cleanup async resources on deletion."""
+        # Check if _async_session exists (may not be initialized)
+        if hasattr(self, '_async_session') and self._async_session and not self._async_session.closed:
+            # Try to close session synchronously (best effort)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Can't close in running loop, schedule cleanup
+                    loop.create_task(self._async_session.close())
+                else:
+                    loop.run_until_complete(self._async_session.close())
+            except (RuntimeError, AttributeError):
+                # No event loop or session already closed
+                pass
+    
+    def __del__(self):
+        """Cleanup async resources on deletion."""
+        if self._async_session and not self._async_session.closed:
+            # Try to close session synchronously (best effort)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self._async_session.close())
+                else:
+                    loop.run_until_complete(self._async_session.close())
+            except Exception:
+                pass  # Ignore errors during cleanup
 

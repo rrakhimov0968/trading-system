@@ -55,6 +55,17 @@ class AuditAgent(BaseAgent):
         # Report storage (in production, persist to DB)
         self._iteration_summaries: List[IterationSummary] = []
         self._daily_reports: List[AuditReport] = []
+        
+        # Initialize database manager (optional)
+        self.db_manager = None
+        if self.config.database:
+            try:
+                from utils.database import DatabaseManager
+                self.db_manager = DatabaseManager(config=self.config)
+                self.log_info("Database persistence enabled")
+            except Exception as e:
+                self.log_warning(f"Failed to initialize database manager: {e}. Persistence disabled.")
+                self.db_manager = None
     
     def process(
         self,
@@ -99,6 +110,30 @@ class AuditAgent(BaseAgent):
                 metrics=metrics,
                 recommendations=recommendations
             )
+            
+            # Persist to database if available
+            if self.db_manager:
+                try:
+                    # Log iteration summary
+                    self.db_manager.log_iteration(iteration_summary)
+                    
+                    # Log audit report
+                    self.db_manager.log_audit_report(report)
+                    
+                    # Log trades from execution results
+                    if execution_results:
+                        for exec_result in execution_results:
+                            if exec_result.signal:
+                                self.db_manager.log_trade(
+                                    signal=exec_result.signal,
+                                    execution_result=exec_result,
+                                    correlation_id=self._correlation_id
+                                )
+                    
+                    self.log_debug("Data persisted to database")
+                except Exception as e:
+                    self.log_warning(f"Failed to persist to database: {e}")
+                    # Continue even if persistence fails
             
             self.log_info(f"Audit report generated for iteration {iteration_summary.iteration_number}")
             return report
