@@ -244,23 +244,21 @@ class AsyncTradingSystemOrchestrator:
                     }
                     result = await self._async_process(self.execution_agent.process, order_request)
                     execution_results.append(ExecutionResult(
-                        symbol=signal.symbol,
-                        order_id=result.get('order_id', 'N/A'),
-                        action=signal.action,
-                        quantity=signal.qty,
-                        price=signal.price,
-                        status="success"
+                        signal=signal,
+                        order_id=result.get('order_id'),
+                        executed=True,
+                        execution_time=datetime.now(),
+                        fill_price=result.get('fill_price') or signal.price
                     ))
                 except Exception as e:
                     logger.exception(f"Execution failed for {signal.symbol}: {e}")
                     execution_results.append(ExecutionResult(
-                        symbol=signal.symbol,
-                        order_id='N/A',
-                        action=signal.action,
-                        quantity=signal.qty,
-                        price=signal.price,
-                        status="failed",
-                        error=str(e)
+                        signal=signal,
+                        order_id=None,
+                        executed=False,
+                        execution_time=datetime.now(),
+                        error=str(e),
+                        fill_price=None
                     ))
         
         self._current_iteration_data['execution_results'] = execution_results
