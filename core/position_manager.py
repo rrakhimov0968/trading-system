@@ -86,7 +86,8 @@ class PositionManager:
         logger.info(
             f"PositionManager initialized: "
             f"Hard Stop={self.hard_stop_loss_pct*100}%, "
-            f"ATR Multiplier={self.atr_stop_multiplier}x, "
+            f"ATR Multipliers (strategy-specific): {min(self.strategy_atr_multipliers.values())}x-{max(self.strategy_atr_multipliers.values())}x "
+            f"(default: {self.default_atr_multiplier}x), "
             f"ATR Period={self.atr_period}"
         )
     
