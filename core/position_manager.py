@@ -14,7 +14,7 @@ from agents.data_agent import DataAgent
 from core.strategies.indicators import calculate_atr, calculate_rsi
 from models.market_data import MarketData
 from models.enums import OrderSide
-from utils.exceptions import ExecutionError, DataError
+from utils.exceptions import ExecutionError
 from utils.database import DatabaseManager
 from config.settings import AppConfig
 
