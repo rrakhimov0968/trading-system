@@ -20,6 +20,7 @@ from utils.event_bus import EventBus
 from utils.exceptions import TradingSystemError
 from utils.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from core.market_hours import is_market_open, get_market_status_message
+from core.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,19 @@ class AsyncTradingSystemOrchestrator:
             self.execution_agent = ExecutionAgent(config=config)
             self.audit_agent = AuditAgent(config=config)
             
-            logger.info("All agents initialized successfully")
+            # Initialize database manager for position context
+            from utils.database import DatabaseManager
+            db_manager = DatabaseManager(config=config)
+            
+            # Initialize PositionManager for stop-loss management
+            self.position_manager = PositionManager(
+                config=config,
+                execution_agent=self.execution_agent,
+                data_agent=self.data_agent,
+                database_manager=db_manager
+            )
+            
+            logger.info("All agents and PositionManager initialized successfully")
         except Exception as e:
             logger.exception("Failed to initialize agents")
             raise TradingSystemError(
@@ -443,6 +456,19 @@ class AsyncTradingSystemOrchestrator:
                     # Sleep 5 minutes instead of 60 seconds when market is closed
                     await asyncio.sleep(300)
                     continue
+                
+                # Check positions for stop-loss triggers (runs every iteration)
+                # This is the "hard brake" to prevent holding losing positions
+                try:
+                    stop_results = self.position_manager.check_stops()
+                    if stop_results.get("stop_orders_placed", 0) > 0:
+                        logger.warning(
+                            f"PositionManager exited {stop_results['stop_orders_placed']} position(s): "
+                            f"{', '.join(stop_results.get('symbols_exited', []))}"
+                        )
+                except Exception as e:
+                    logger.exception(f"Error in PositionManager.check_stops: {str(e)}")
+                    # Don't stop the main loop if position manager fails
                 
                 self.monitoring_metrics["total_iterations"] += 1
                 await self.run_async_pipeline()

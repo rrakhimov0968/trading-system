@@ -540,6 +540,91 @@ class DatabaseManager:
             logger.exception(f"Failed to query trade history: {e}")
             return []
     
+    def get_open_positions_with_strategy(self) -> List[Dict[str, Any]]:
+        """
+        Get all open positions with their strategy information.
+        
+        An open position is a BUY order that hasn't been closed by a SELL order.
+        This queries TradeHistory for the most recent executed BUY order per symbol
+        that hasn't been offset by a SELL order.
+        
+        Returns:
+            List of dictionaries with position info:
+            {
+                'symbol': str,
+                'strategy_name': str,
+                'entry_price': float,
+                'qty': int,
+                'stop_loss': float,
+                'timestamp': datetime,
+                'correlation_id': str
+            }
+        """
+        try:
+            with self.session() as session:
+                # Get all executed BUY orders
+                buy_orders = session.query(TradeHistory).filter(
+                    TradeHistory.action == SignalAction.BUY,
+                    TradeHistory.executed == True
+                ).order_by(TradeHistory.timestamp.desc()).all()
+                
+                # Get all executed SELL orders for tracking closed positions
+                sell_orders = session.query(TradeHistory).filter(
+                    TradeHistory.action == SignalAction.SELL,
+                    TradeHistory.executed == True
+                ).order_by(TradeHistory.timestamp.desc()).all()
+                
+                # Calculate net position per symbol
+                position_map = {}
+                
+                # Add all BUY orders
+                for buy in buy_orders:
+                    if buy.symbol not in position_map:
+                        position_map[buy.symbol] = {
+                            'symbol': buy.symbol,
+                            'strategy_name': buy.strategy_name,
+                            'entry_price': buy.fill_price or buy.price,
+                            'qty': buy.qty or 0,
+                            'stop_loss': buy.stop_loss,
+                            'timestamp': buy.timestamp,
+                            'correlation_id': buy.correlation_id or buy.id
+                        }
+                    else:
+                        # Add to existing position (multiple buys)
+                        existing = position_map[buy.symbol]
+                        total_qty = existing['qty'] + (buy.qty or 0)
+                        # Weighted average entry price
+                        existing_value = existing['entry_price'] * existing['qty']
+                        new_value = (buy.fill_price or buy.price) * (buy.qty or 0)
+                        position_map[buy.symbol]['entry_price'] = (
+                            (existing_value + new_value) / total_qty if total_qty > 0 else existing['entry_price']
+                        )
+                        position_map[buy.symbol]['qty'] = total_qty
+                        # Keep most recent timestamp
+                        if buy.timestamp > existing['timestamp']:
+                            position_map[buy.symbol]['timestamp'] = buy.timestamp
+                
+                # Subtract all SELL orders
+                for sell in sell_orders:
+                    if sell.symbol in position_map:
+                        position_map[sell.symbol]['qty'] -= (sell.qty or 0)
+                        # If qty goes to zero or below, remove the position
+                        if position_map[sell.symbol]['qty'] <= 0:
+                            del position_map[sell.symbol]
+                
+                # Return only positions with positive qty
+                open_positions = [
+                    pos for pos in position_map.values()
+                    if pos['qty'] > 0
+                ]
+                
+                logger.debug(f"Found {len(open_positions)} open positions with strategy info")
+                return open_positions
+                
+        except Exception as e:
+            logger.exception(f"Failed to query open positions: {e}")
+            return []
+    
     def get_equity_curve(
         self,
         start_date: Optional[datetime] = None,
