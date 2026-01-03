@@ -166,11 +166,12 @@ class DataAgent(BaseAgent):
         timeframe: str,
         start_date: Optional[datetime],
         end_date: Optional[datetime],
-        limit: int
+        limit: int,
+        strict_validation: bool = True
     ) -> MarketData:
         """Fetch data using the configured provider."""
         if self.provider == DataProvider.ALPACA:
-            return self._fetch_alpaca_data(symbol, timeframe, start_date, end_date, limit)
+            return self._fetch_alpaca_data(symbol, timeframe, start_date, end_date, limit, strict_validation=strict_validation)
         elif self.provider == DataProvider.POLYGON:
             return self._fetch_polygon_data(symbol, timeframe, start_date, end_date, limit)
         elif self.provider == DataProvider.YAHOO:
@@ -188,7 +189,8 @@ class DataAgent(BaseAgent):
         timeframe: str,
         start_date: Optional[datetime],
         end_date: Optional[datetime],
-        limit: int
+        limit: int,
+        strict_validation: bool = True
     ) -> MarketData:
         """Fetch data from Alpaca Data API."""
         # Acquire rate limiter before making API call
@@ -399,12 +401,19 @@ class DataAgent(BaseAgent):
             
             market_data = MarketData(symbol=symbol, bars=bars)
             
-            # Validate data quality before returning
-            if not self._validate_market_data(market_data, symbol):
+            # Validate data quality before returning (unless strict_validation=False)
+            # During health checks, we just need to verify API connectivity, not perfect data
+            if strict_validation and not self._validate_market_data(market_data, symbol):
                 raise AgentError(
                     f"Data validation failed for {symbol}",
                     correlation_id=self._correlation_id
                 )
+            elif not strict_validation:
+                # For non-strict validation, just log a warning if validation fails
+                if not self._validate_market_data(market_data, symbol):
+                    self.log_warning(
+                        f"Data validation warning for {symbol} (non-strict mode - continuing anyway)"
+                    )
             
             return market_data
             
@@ -985,12 +994,14 @@ class DataAgent(BaseAgent):
         try:
             # Try to fetch data for a test symbol with wider date range
             # Use 30 days lookback to ensure we get data even if market was closed recently
+            # Use strict_validation=False for health checks - we just need to verify API connectivity
             test_data = self._fetch_data(
                 "AAPL",
                 "1Day",
                 datetime.now() - timedelta(days=30),
                 datetime.now(),
-                100  # Request more bars to ensure we get some data
+                100,  # Request more bars to ensure we get some data
+                strict_validation=False  # Don't fail health check due to stale/insufficient data
             )
             
             # Check if we got any data (more tolerant - just need API to work)
