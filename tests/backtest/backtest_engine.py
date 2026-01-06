@@ -234,8 +234,7 @@ class BacktestEngine:
         """
         Generate entry/exit signals using an existing strategy class.
         
-        This bridges the gap between your strategy classes (which use MarketData)
-        and VectorBT (which needs entry/exit DataFrames).
+        Fixed version that properly handles strategy state and signal conversion.
         
         Args:
             strategy_class: Strategy class from core.strategies (e.g., TrendFollowing)
@@ -248,87 +247,133 @@ class BacktestEngine:
         from models.market_data import MarketData, Bar
         from models.signal import SignalAction
         
+        # Initialize DataFrames with False values
         entries = pd.DataFrame(False, index=price_data.index, columns=price_data.columns)
         exits = pd.DataFrame(False, index=price_data.index, columns=price_data.columns)
         
-        strategy = strategy_class(config=strategy_config or {})
-        
-        # For each symbol
+        # Initialize strategy once per symbol
         for symbol in price_data.columns:
-            # Convert price_data to MarketData format
-            symbol_data = price_data[symbol].dropna()
+            logger.info(f"Generating signals for {symbol}...")
             
-            if len(symbol_data) < 30:  # Minimum bars needed
-                logger.warning(f"Insufficient data for {symbol}: {len(symbol_data)} bars")
+            # Get symbol data
+            symbol_close = price_data[symbol].dropna()
+            
+            if len(symbol_close) < 30:  # Minimum bars needed
+                logger.warning(f"Insufficient data for {symbol}: {len(symbol_close)} bars")
                 continue
             
-            # Create bars from price/OHLC data
+            # Create MarketData object with all bars
             bars = []
-            for idx in symbol_data.index:
-                # Try to get full OHLC if available
-                if self.ohlc_data and 'close' in self.ohlc_data:
-                    try:
-                        # Get OHLC values for this symbol and timestamp
-                        close_price = self.ohlc_data['close'].loc[idx, symbol] if symbol in self.ohlc_data['close'].columns else symbol_data.loc[idx]
-                        open_price = self.ohlc_data['open'].loc[idx, symbol] if 'open' in self.ohlc_data and symbol in self.ohlc_data['open'].columns else close_price
-                        high_price = self.ohlc_data['high'].loc[idx, symbol] if 'high' in self.ohlc_data and symbol in self.ohlc_data['high'].columns else close_price
-                        low_price = self.ohlc_data['low'].loc[idx, symbol] if 'low' in self.ohlc_data and symbol in self.ohlc_data['low'].columns else close_price
-                        volume = int(self.ohlc_data['volume'].loc[idx, symbol]) if 'volume' in self.ohlc_data and symbol in self.ohlc_data['volume'].columns else 0
-                    except (KeyError, IndexError, AttributeError) as e:
-                        # Fallback to close price for all OHLC
-                        close_price = symbol_data.loc[idx]
-                        open_price = high_price = low_price = close_price
-                        volume = 0
-                else:
-                    # Fallback: use close price for all OHLC
-                    close_price = symbol_data.loc[idx]
-                    open_price = high_price = low_price = close_price
-                    volume = 0
-                
+            for idx, close_price in symbol_close.items():
                 timestamp = idx if isinstance(idx, datetime) else pd.to_datetime(idx)
+                
+                # Try to get OHLC data if available
+                if hasattr(self, 'ohlc_data') and self.ohlc_data:
+                    try:
+                        # Get OHLC values
+                        close_val = self.ohlc_data['close'].loc[idx, symbol] if symbol in self.ohlc_data['close'].columns else close_price
+                        open_val = self.ohlc_data['open'].loc[idx, symbol] if 'open' in self.ohlc_data and symbol in self.ohlc_data['open'].columns else close_val
+                        high_val = self.ohlc_data['high'].loc[idx, symbol] if 'high' in self.ohlc_data and symbol in self.ohlc_data['high'].columns else close_val
+                        low_val = self.ohlc_data['low'].loc[idx, symbol] if 'low' in self.ohlc_data and symbol in self.ohlc_data['low'].columns else close_val
+                        volume_val = int(self.ohlc_data['volume'].loc[idx, symbol]) if 'volume' in self.ohlc_data and symbol in self.ohlc_data['volume'].columns else 0
+                    except Exception:
+                        # Fallback
+                        open_val = high_val = low_val = close_price
+                        volume_val = 0
+                else:
+                    open_val = high_val = low_val = close_price
+                    volume_val = 0
+                
                 bars.append(Bar(
                     timestamp=timestamp,
-                    open=float(open_price),
-                    high=float(high_price),
-                    low=float(low_price),
-                    close=float(close_price),
-                    volume=int(volume) if volume > 0 else 0,
+                    open=float(open_val),
+                    high=float(high_val),
+                    low=float(low_val),
+                    close=float(close_val),
+                    volume=int(volume_val),
                     symbol=symbol,
                     timeframe="1Day"
                 ))
             
+            # Create single MarketData object with ALL bars
             market_data = MarketData(symbol=symbol, bars=bars)
             
-            # Generate signals for each day (rolling window)
-            # We'll use a rolling window approach to simulate daily signal generation
-            for i in range(30, len(bars)):  # Start after minimum bars
-                try:
+            # Initialize strategy
+            strategy = strategy_class(config=strategy_config or {})
+            
+            # **DEBUG: Print strategy type and config**
+            logger.debug(f"Using strategy: {strategy.__class__.__name__}")
+            
+            # Generate signals for ALL bars at once
+            # Most strategies internally handle rolling windows
+            try:
+                signal_data = []
+                
+                # Get lookback period (default to 200 for strategies that need MA200, or 50 minimum)
+                lookback_period = getattr(strategy, 'lookback_period', 200)
+                min_bars = max(lookback_period, 50)  # At least 50 bars, or strategy's lookback
+                
+                # Process each bar sequentially to simulate live trading
+                for i in range(min_bars, len(bars)):
+                    # Get current bar
+                    current_bar = bars[i]
+                    
                     # Create market data up to current point
-                    current_bars = bars[:i+1]
-                    current_market_data = MarketData(symbol=symbol, bars=current_bars)
+                    current_market_data = MarketData(
+                        symbol=symbol,
+                        bars=bars[:i+1]  # All bars up to current
+                    )
                     
                     # Generate signal
-                    signal = strategy.generate_signal(current_market_data)
-                    
-                    # Convert to entry/exit
-                    date_idx = bars[i].timestamp
-                    if isinstance(date_idx, str):
-                        date_idx = pd.to_datetime(date_idx)
-                    
+                    try:
+                        signal = strategy.generate_signal(current_market_data)
+                        signal_data.append((current_bar.timestamp, signal))
+                        
+                        # **DEBUG: Log first few signals**
+                        if i < min_bars + 10:
+                            logger.debug(f"  {current_bar.timestamp}: {signal}")
+                            
+                    except (ValueError, Exception) as e:
+                        logger.debug(f"Signal generation error at {current_bar.timestamp}: {e}")
+                        continue
+                
+                # **DEBUG: Count signal types**
+                buy_signals = sum(1 for _, s in signal_data if s == SignalAction.BUY)
+                sell_signals = sum(1 for _, s in signal_data if s == SignalAction.SELL)
+                hold_signals = sum(1 for _, s in signal_data if s == SignalAction.HOLD)
+                
+                logger.info(f"{symbol}: {buy_signals} BUY, {sell_signals} SELL, {hold_signals} HOLD signals")
+                
+                # Convert signals to entries/exits
+                # VectorBT needs: entries=True for BUY, exits=True for SELL
+                for timestamp, signal in signal_data:
                     if signal == SignalAction.BUY:
-                        entries.loc[date_idx, symbol] = True
+                        entries.loc[timestamp, symbol] = True
                     elif signal == SignalAction.SELL:
-                        exits.loc[date_idx, symbol] = True
-                    # HOLD signals are ignored (no entry/exit)
-                    
-                except (ValueError, Exception) as e:
-                    # Skip if insufficient data or strategy error
-                    continue
+                        exits.loc[timestamp, symbol] = True
+                    # HOLD signals are ignored
+                
+            except Exception as e:
+                logger.exception(f"Error generating signals for {symbol}: {e}")
+                continue
         
-        logger.info(
-            f"Generated {entries.sum().sum()} entry signals and "
-            f"{exits.sum().sum()} exit signals"
-        )
+        # **DEBUG: Print signal statistics**
+        logger.info(f"Generated {entries.sum().sum()} entry signals and {exits.sum().sum()} exit signals")
+        
+        # **CRITICAL: Check if any signals exist**
+        if entries.sum().sum() == 0 and exits.sum().sum() == 0:
+            logger.warning("⚠️ NO SIGNALS GENERATED! Check strategy logic.")
+        else:
+            # Print first few signals for debugging
+            for symbol in entries.columns:
+                symbol_entries = entries[symbol]
+                symbol_exits = exits[symbol]
+                if symbol_entries.any():
+                    first_entry = symbol_entries[symbol_entries].index[0]
+                    logger.info(f"{symbol}: First entry at {first_entry}")
+                if symbol_exits.any():
+                    first_exit = symbol_exits[symbol_exits].index[0]
+                    logger.info(f"{symbol}: First exit at {first_exit}")
         
         return entries, exits
     
@@ -351,6 +396,41 @@ class BacktestEngine:
         """
         logger.info("Running backtest simulation...")
         
+        # DEBUG: Print signal stats
+        print(f"\n📊 SIGNAL STATISTICS:")
+        print(f"Price data shape: {price_data.shape}")
+        print(f"Entries shape: {entries.shape}")
+        print(f"Total entry signals: {entries.sum().sum()}")
+        print(f"Total exit signals: {exits.sum().sum()}")
+        
+        # Check for signal issues
+        if entries.sum().sum() == 0:
+            print("⚠️ NO ENTRY SIGNALS - Check strategy logic!")
+        
+        if exits.sum().sum() == 0:
+            print("⚠️ NO EXIT SIGNALS - Check strategy logic!")
+        
+        # Check if entries and exits are properly paired
+        # VectorBT needs at least one entry and one exit to create a trade
+        for symbol in price_data.columns:
+            if symbol in entries.columns and symbol in exits.columns:
+                entry_count = entries[symbol].sum()
+                exit_count = exits[symbol].sum()
+                if entry_count > 0 and exit_count == 0:
+                    print(f"⚠️ {symbol}: Has entries but NO exits!")
+                elif exit_count > 0 and entry_count == 0:
+                    print(f"⚠️ {symbol}: Has exits but NO entries!")
+        
+        # DEBUG: Show sample of first entry and exit
+        for symbol in price_data.columns[:2]:  # First 2 symbols
+            if entries[symbol].any():
+                first_entry = entries[symbol][entries[symbol]].index[0]
+                print(f"{symbol} first entry: {first_entry}")
+            if exits[symbol].any():
+                first_exit = exits[symbol][exits[symbol]].index[0]
+                print(f"{symbol} first exit: {first_exit}")
+        
+        # Run VectorBT backtest
         portfolio = vbt.Portfolio.from_signals(
             price_data,
             entries,
@@ -359,6 +439,18 @@ class BacktestEngine:
             fees=self.commission,
             freq='1D'
         )
+        
+        # DEBUG: Check trades
+        trades = portfolio.trades
+        if trades is not None and len(trades) > 0:
+            print(f"✅ Generated {len(trades)} trades")
+        else:
+            print("❌ NO TRADES GENERATED!")
+            # Try to understand why
+            if entries.sum().sum() > 0 and exits.sum().sum() > 0:
+                print("   - Signals exist but no trades created")
+                print("   - Possible issue: Entry/exit signals not properly paired")
+                print("   - Check if exit comes after entry for each trade")
         
         logger.info("✅ Backtest complete")
         return portfolio
@@ -549,6 +641,40 @@ class BacktestEngine:
         except Exception as e:
             logger.exception(f"Error analyzing backtest results: {e}")
             raise
+    
+    def debug_signals(self, price_data: pd.DataFrame, entries: pd.DataFrame, exits: pd.DataFrame) -> None:
+        """
+        Debug signal generation issues.
+        """
+        print("\n" + "=" * 80)
+        print("🔍 DEBUG SIGNAL ANALYSIS")
+        print("=" * 80)
+        
+        for symbol in price_data.columns:
+            print(f"\n{symbol}:")
+            symbol_entries = entries[symbol].sum()
+            symbol_exits = exits[symbol].sum()
+            print(f"  Entry signals: {symbol_entries}")
+            print(f"  Exit signals: {symbol_exits}")
+            
+            if symbol_entries > 0:
+                entry_dates = entries[symbol][entries[symbol]].index
+                print(f"  First entry: {entry_dates[0]}")
+                print(f"  Last entry: {entry_dates[-1]}")
+            
+            if symbol_exits > 0:
+                exit_dates = exits[symbol][exits[symbol]].index
+                print(f"  First exit: {exit_dates[0]}")
+                print(f"  Last exit: {exit_dates[-1]}")
+            
+            # Check for signal conflicts
+            if symbol_entries > 0 and symbol_exits > 0:
+                # Check if entry and exit signals overlap
+                overlap = (entries[symbol] & exits[symbol]).sum()
+                if overlap > 0:
+                    print(f"  ⚠️ WARNING: {overlap} overlapping entry/exit signals!")
+        
+        print("\n" + "=" * 80)
     
     def print_results(self, results: Dict[str, Any]) -> None:
         """

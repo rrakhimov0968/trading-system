@@ -54,6 +54,8 @@ class StrategyBacktester:
         """
         Run backtest for strategy on given symbols.
         
+        Added debug calls.
+        
         Args:
             symbols: List of stock symbols to test
             start_date: Start date (YYYY-MM-DD)
@@ -69,12 +71,21 @@ class StrategyBacktester:
         if price_data.empty:
             raise ValueError("No data fetched for backtesting")
         
+        print(f"\n📈 DATA LOADED:")
+        print(f"  Symbols: {list(price_data.columns)}")
+        print(f"  Period: {price_data.index[0]} to {price_data.index[-1]}")
+        print(f"  Days: {len(price_data)}")
+        
         # Generate signals using existing strategy class
         entries, exits = self.engine.generate_signals_from_strategy(
             self.strategy_class,
             price_data,
             self.strategy_config
         )
+        
+        # DEBUG: Call debug method
+        if hasattr(self.engine, 'debug_signals'):
+            self.engine.debug_signals(price_data, entries, exits)
         
         # Run backtest
         portfolio = self.engine.run_backtest(price_data, entries, exits)
