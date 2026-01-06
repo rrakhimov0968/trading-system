@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from models.signal import SignalAction, TradingSignal
 from models.audit import ExecutionResult, IterationSummary, AuditReport
 from config.settings import DatabaseConfig, AppConfig
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,43 @@ class RiskMetrics(Base):
     current_daily_loss = Column(Float, default=0.0)
     
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BacktestResults(Base):
+    """Backtest results table for strategy validation."""
+    __tablename__ = 'backtest_results'
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    strategy_name = Column(String, nullable=False, index=True)
+    symbol = Column(String, nullable=False, index=True)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    
+    # Performance metrics
+    total_return = Column(Float)
+    sharpe_ratio = Column(Float)
+    max_drawdown = Column(Float)
+    win_rate = Column(Float)
+    total_trades = Column(Integer)
+    avg_trade_return = Column(Float)
+    
+    # Validation status
+    passed = Column(Boolean, default=False, index=True)
+    min_sharpe = Column(Float)
+    max_drawdown_threshold = Column(Float)
+    min_win_rate = Column(Float)
+    
+    # Additional metadata
+    parameters = Column(Text)  # JSON string of strategy parameters
+    risk_free_rate = Column(Float)  # Risk-free rate used for Sharpe
+    initial_cash = Column(Float)
+    commission = Column(Float)
+    
+    # Walk-forward info
+    is_walk_forward = Column(Boolean, default=False)
+    walk_forward_period = Column(Integer)  # Which period in walk-forward
+    
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class IterationLog(Base):
@@ -661,6 +699,136 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.exception(f"Failed to query equity curve: {e}")
+            return []
+    
+    def log_backtest_result(
+        self,
+        strategy_name: str,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        total_return: float,
+        sharpe_ratio: float,
+        max_drawdown: float,
+        win_rate: float,
+        total_trades: int,
+        avg_trade_return: float,
+        passed: bool,
+        min_sharpe: float,
+        max_drawdown_threshold: float,
+        min_win_rate: float,
+        parameters: Optional[Dict[str, Any]] = None,
+        risk_free_rate: float = 0.04,
+        initial_cash: float = 10000.0,
+        commission: float = 0.001,
+        is_walk_forward: bool = False,
+        walk_forward_period: Optional[int] = None
+    ) -> str:
+        """
+        Log backtest result to database.
+        
+        Args:
+            strategy_name: Strategy name
+            symbol: Stock symbol
+            start_date: Backtest start date
+            end_date: Backtest end date
+            total_return: Total return percentage
+            sharpe_ratio: Sharpe ratio
+            max_drawdown: Maximum drawdown percentage
+            win_rate: Win rate percentage
+            total_trades: Total number of trades
+            avg_trade_return: Average trade return
+            passed: Whether strategy passed validation
+            min_sharpe: Minimum Sharpe threshold used
+            max_drawdown_threshold: Maximum drawdown threshold used
+            min_win_rate: Minimum win rate threshold used
+            parameters: Strategy parameters (dict, will be JSON encoded)
+            risk_free_rate: Risk-free rate used
+            initial_cash: Initial capital
+            commission: Commission rate
+            is_walk_forward: Whether this is a walk-forward result
+            walk_forward_period: Period number if walk-forward
+        
+        Returns:
+            ID of the logged result
+        """
+        result_id = self.generate_correlation_id()
+        
+        try:
+            with self.session() as session:
+                result = BacktestResults(
+                    id=result_id,
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    total_return=total_return,
+                    sharpe_ratio=sharpe_ratio,
+                    max_drawdown=max_drawdown,
+                    win_rate=win_rate,
+                    total_trades=total_trades,
+                    avg_trade_return=avg_trade_return,
+                    passed=passed,
+                    min_sharpe=min_sharpe,
+                    max_drawdown_threshold=max_drawdown_threshold,
+                    min_win_rate=min_win_rate,
+                    parameters=json.dumps(parameters) if parameters else None,
+                    risk_free_rate=risk_free_rate,
+                    initial_cash=initial_cash,
+                    commission=commission,
+                    is_walk_forward=is_walk_forward,
+                    walk_forward_period=walk_forward_period
+                )
+                
+                session.add(result)
+                logger.debug(f"Logged backtest result for {strategy_name} on {symbol}")
+            
+            return result_id
+            
+        except Exception as e:
+            logger.exception(f"Failed to log backtest result: {e}")
+            raise
+    
+    def get_backtest_results(
+        self,
+        strategy_name: Optional[str] = None,
+        symbol: Optional[str] = None,
+        passed_only: bool = False,
+        limit: int = 100
+    ) -> List[BacktestResults]:
+        """
+        Query backtest results.
+        
+        Args:
+            strategy_name: Optional strategy filter
+            symbol: Optional symbol filter
+            passed_only: Only return passed results
+            limit: Maximum number of results
+        
+        Returns:
+            List of BacktestResults records
+        """
+        try:
+            with self.session() as session:
+                query = session.query(BacktestResults)
+                
+                if strategy_name:
+                    query = query.filter(BacktestResults.strategy_name == strategy_name)
+                
+                if symbol:
+                    query = query.filter(BacktestResults.symbol == symbol)
+                
+                if passed_only:
+                    query = query.filter(BacktestResults.passed == True)
+                
+                query = query.order_by(BacktestResults.created_at.desc()).limit(limit)
+                
+                results = query.all()
+                session.expunge_all()
+                return results
+                
+        except Exception as e:
+            logger.exception(f"Failed to query backtest results: {e}")
             return []
     
     def health_check(self) -> Dict[str, Any]:

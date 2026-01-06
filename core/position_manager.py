@@ -141,6 +141,12 @@ class PositionManager:
                     strategy_info = strategy_map.get(symbol, {})
                     strategy_name = strategy_info.get('strategy_name', 'Unknown')
                     
+                    # Skip positions with SYNCED_FROM_ALPACA strategy (manually closed positions)
+                    # These are SELL orders that were manually executed and synced from Alpaca
+                    if strategy_name == 'SYNCED_FROM_ALPACA':
+                        logger.debug(f"Skipping position {symbol} - manually closed (SYNCED_FROM_ALPACA)")
+                        continue
+                    
                     logger.debug(
                         f"Position {symbol} ({strategy_name}): Entry=${entry_price:.2f}, "
                         f"Current=${current_price:.2f}, Qty={quantity}"

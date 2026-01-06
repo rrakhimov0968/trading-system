@@ -248,6 +248,11 @@ class AsyncTradingSystemOrchestrator:
         
         for signal in approved:
             if signal.action != SignalAction.HOLD:
+                order_id = None
+                fill_price = None
+                executed = False
+                error = None
+                
                 try:
                     order_request = {
                         "symbol": signal.symbol,
@@ -256,23 +261,34 @@ class AsyncTradingSystemOrchestrator:
                         "order_type": "market"
                     }
                     result = await self._async_process(self.execution_agent.process, order_request)
-                    execution_results.append(ExecutionResult(
-                        signal=signal,
-                        order_id=result.get('order_id'),
-                        executed=True,
-                        execution_time=datetime.now(),
-                        fill_price=result.get('fill_price') or signal.price
-                    ))
+                    order_id = result.get('order_id')
+                    fill_price = result.get('fill_price') or signal.price
+                    executed = True  # Order was placed successfully
+                    
                 except Exception as e:
+                    error_str = str(e)
                     logger.exception(f"Execution failed for {signal.symbol}: {e}")
-                    execution_results.append(ExecutionResult(
-                        signal=signal,
-                        order_id=None,
-                        executed=False,
-                        execution_time=datetime.now(),
-                        error=str(e),
-                        fill_price=None
-                    ))
+                    
+                    # CRITICAL: Check if order_id is in error message or if we can recover it
+                    # Sometimes Alpaca places the order but our code fails afterward
+                    # If we have any indication the order was placed, mark as executed
+                    # This is a safety measure - better to log as executed than miss a trade
+                    
+                    # Try to extract order_id from error if it exists
+                    # For now, we'll mark as failed, but we'll add a sync mechanism
+                    executed = False
+                    error = error_str
+                
+                # Create ExecutionResult regardless of success/failure
+                # This ensures all trades are logged to DB
+                execution_results.append(ExecutionResult(
+                    signal=signal,
+                    order_id=order_id,
+                    executed=executed,
+                    execution_time=datetime.now(),
+                    error=error,
+                    fill_price=fill_price
+                ))
         
         self._current_iteration_data['execution_results'] = execution_results
         await self.event_bus.publish('executed_ready', execution_results)

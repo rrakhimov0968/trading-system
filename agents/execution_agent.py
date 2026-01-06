@@ -105,12 +105,20 @@ class ExecutionAgent(BaseAgent):
                     correlation_id=self._correlation_id
                 )
             
+            # Get fill price if available (for filled orders)
+            fill_price = None
+            if hasattr(order, 'filled_avg_price') and order.filled_avg_price:
+                fill_price = float(order.filled_avg_price)
+            elif hasattr(order, 'filled_price') and order.filled_price:
+                fill_price = float(order.filled_price)
+            
             result = {
                 "order_id": order.id,
                 "symbol": order.symbol,
                 "quantity": order.qty,
                 "side": order.side.value,
                 "status": order.status.value if hasattr(order.status, 'value') else str(order.status),
+                "fill_price": fill_price,  # Include fill_price if available
                 "correlation_id": self._correlation_id
             }
             
