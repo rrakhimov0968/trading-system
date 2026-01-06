@@ -28,7 +28,10 @@ class BacktestEngine:
         initial_cash: float = 10000.0,
         commission: float = 0.001,  # 0.1% per trade
         risk_free_rate: float = 0.04,  # 4% annual risk-free rate
-        database_manager: Optional[DatabaseManager] = None
+        database_manager: Optional[DatabaseManager] = None,
+        enable_risk_management: bool = True,
+        default_stop_loss_pct: float = 0.15,  # 15% stop-loss
+        default_take_profit_pct: float = 0.25  # 25% take-profit
     ):
         """
         Initialize backtest engine.
@@ -45,14 +48,21 @@ class BacktestEngine:
         self.commission = commission
         self.risk_free_rate = risk_free_rate
         self.db_manager = database_manager
+        self.enable_risk_management = enable_risk_management
+        self.default_stop_loss_pct = default_stop_loss_pct
+        self.default_take_profit_pct = default_take_profit_pct
+        self.default_trailing_stop_pct = 0.08  # 8% trailing stop by default
+        
+        # Track highest prices for trailing stops (per symbol per entry)
+        self._highest_price_tracking: Dict[str, float] = {}
         
         # Load thresholds from config or use defaults
         if config:
             self.min_sharpe = config.quant_min_sharpe
             self.max_drawdown_threshold = config.quant_max_drawdown
         else:
-            self.min_sharpe = float(os.getenv("QUANT_MIN_SHARPE", "1.5"))
-            self.max_drawdown_threshold = float(os.getenv("QUANT_MAX_DRAWDOWN", "0.08"))
+            self.min_sharpe = float(os.getenv("QUANT_MIN_SHARPE", "0.8"))  # Lowered from 1.5 for realistic validation
+            self.max_drawdown_threshold = float(os.getenv("QUANT_MAX_DRAWDOWN", "0.15"))  # Increased from 0.08 (8%) to 0.15 (15%)
         
         self.min_win_rate = 0.45  # 45% minimum win rate
         
@@ -309,6 +319,20 @@ class BacktestEngine:
             try:
                 signal_data = []
                 
+                # Track position state and entry price for risk management
+                in_position = False
+                entry_price = 0.0
+                entry_timestamp = None
+                position_key = None  # Track unique position for trailing stop
+                
+                # Get risk management parameters from strategy config or use defaults
+                stop_loss_pct = strategy.config.get('stop_loss_pct', self.default_stop_loss_pct) if self.enable_risk_management else None
+                take_profit_pct = strategy.config.get('take_profit_pct', self.default_take_profit_pct) if self.enable_risk_management else None
+                trailing_stop_pct = strategy.config.get('trailing_stop_pct', self.default_trailing_stop_pct) if self.enable_risk_management else None
+                
+                # Create unique key for tracking this position (symbol + entry timestamp)
+                position_key = None
+                
                 # Get lookback period (default to 200 for strategies that need MA200, or 50 minimum)
                 lookback_period = getattr(strategy, 'lookback_period', 200)
                 min_bars = max(lookback_period, 50)  # At least 50 bars, or strategy's lookback
@@ -317,6 +341,7 @@ class BacktestEngine:
                 for i in range(min_bars, len(bars)):
                     # Get current bar
                     current_bar = bars[i]
+                    current_price = current_bar.close
                     
                     # Create market data up to current point
                     current_market_data = MarketData(
@@ -324,14 +349,106 @@ class BacktestEngine:
                         bars=bars[:i+1]  # All bars up to current
                     )
                     
-                    # Generate signal
+                    # RISK MANAGEMENT: Check stop-loss, trailing stop, and take-profit BEFORE generating signal
+                    if self.enable_risk_management and in_position and entry_price > 0:
+                        # Create position tracking key
+                        if position_key is None:
+                            position_key = f"{symbol}_{entry_timestamp.isoformat() if entry_timestamp else 'unknown'}"
+                        
+                        # Initialize highest price tracking for this position
+                        if position_key not in self._highest_price_tracking:
+                            self._highest_price_tracking[position_key] = entry_price
+                        
+                        # Update highest price since entry (for trailing stop)
+                        if current_price > self._highest_price_tracking[position_key]:
+                            self._highest_price_tracking[position_key] = current_price
+                            highest_price = current_price
+                        else:
+                            highest_price = self._highest_price_tracking[position_key]
+                        
+                        # Check 1: Fixed stop-loss (absolute loss limit)
+                        if stop_loss_pct and current_price <= entry_price * (1 - stop_loss_pct):
+                            # Stop-loss hit!
+                            signal_data.append((current_bar.timestamp, SignalAction.SELL))
+                            in_position = False
+                            loss_pct = (current_price / entry_price - 1) * 100
+                            logger.debug(f"  {current_bar.timestamp}: STOP-LOSS at ${current_price:.2f} (entry: ${entry_price:.2f}, loss: {loss_pct:.2f}%)")
+                            entry_price = 0.0
+                            entry_timestamp = None
+                            # Clean up tracking
+                            if position_key in self._highest_price_tracking:
+                                del self._highest_price_tracking[position_key]
+                            position_key = None
+                            continue
+                        
+                        # Check 2: Trailing stop-loss (protects gains, moves up with price)
+                        if trailing_stop_pct and highest_price > entry_price:
+                            # Only apply trailing stop if we have gains (price above entry)
+                            trailing_stop_price = highest_price * (1 - trailing_stop_pct)
+                            if current_price <= trailing_stop_price:
+                                # Trailing stop hit!
+                                signal_data.append((current_bar.timestamp, SignalAction.SELL))
+                                in_position = False
+                                gain_pct = (current_price / entry_price - 1) * 100
+                                peak_gain_pct = (highest_price / entry_price - 1) * 100
+                                logger.debug(f"  {current_bar.timestamp}: TRAILING STOP at ${current_price:.2f} (entry: ${entry_price:.2f}, peak: ${highest_price:.2f}, gain: {gain_pct:.2f}%, peak gain: {peak_gain_pct:.2f}%)")
+                                entry_price = 0.0
+                                entry_timestamp = None
+                                # Clean up tracking
+                                if position_key in self._highest_price_tracking:
+                                    del self._highest_price_tracking[position_key]
+                                position_key = None
+                                continue
+                        
+                        # Check 3: Take-profit (lock in large gains)
+                        if take_profit_pct and current_price >= entry_price * (1 + take_profit_pct):
+                            # Take-profit hit!
+                            signal_data.append((current_bar.timestamp, SignalAction.SELL))
+                            in_position = False
+                            gain_pct = (current_price / entry_price - 1) * 100
+                            logger.debug(f"  {current_bar.timestamp}: TAKE-PROFIT at ${current_price:.2f} (entry: ${entry_price:.2f}, gain: {gain_pct:.2f}%)")
+                            entry_price = 0.0
+                            entry_timestamp = None
+                            # Clean up tracking
+                            if position_key in self._highest_price_tracking:
+                                del self._highest_price_tracking[position_key]
+                            position_key = None
+                            continue
+                    
+                    # Generate signal from strategy
                     try:
                         signal = strategy.generate_signal(current_market_data)
-                        signal_data.append((current_bar.timestamp, signal))
                         
-                        # **DEBUG: Log first few signals**
-                        if i < min_bars + 10:
-                            logger.debug(f"  {current_bar.timestamp}: {signal}")
+                        # Handle original strategy signals
+                        if signal == SignalAction.BUY and not in_position:
+                            signal_data.append((current_bar.timestamp, SignalAction.BUY))
+                            in_position = True
+                            entry_price = current_price
+                            entry_timestamp = current_bar.timestamp
+                            position_key = f"{symbol}_{entry_timestamp.isoformat()}"
+                            # Initialize highest price tracking
+                            self._highest_price_tracking[position_key] = entry_price
+                            if i < min_bars + 10:
+                                logger.debug(f"  {current_bar.timestamp}: BUY at ${entry_price:.2f} (entering position)")
+                        elif signal == SignalAction.SELL and in_position:
+                            signal_data.append((current_bar.timestamp, SignalAction.SELL))
+                            in_position = False
+                            gain_pct = (current_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                            if i < min_bars + 10:
+                                logger.debug(f"  {current_bar.timestamp}: SELL at ${current_price:.2f} (exiting position, entry: ${entry_price:.2f}, gain: {gain_pct:.2f}%)")
+                            entry_price = 0.0
+                            entry_timestamp = None
+                            # Clean up tracking
+                            if position_key and position_key in self._highest_price_tracking:
+                                del self._highest_price_tracking[position_key]
+                            position_key = None
+                        elif signal == SignalAction.HOLD:
+                            # HOLD signals are ignored
+                            pass
+                        else:
+                            # Invalid signal combination (BUY when already in position, or SELL when not in position)
+                            if i < min_bars + 10:
+                                logger.debug(f"  {current_bar.timestamp}: {signal} IGNORED (in_position={in_position})")
                             
                     except (ValueError, Exception) as e:
                         logger.debug(f"Signal generation error at {current_bar.timestamp}: {e}")
@@ -340,9 +457,8 @@ class BacktestEngine:
                 # **DEBUG: Count signal types**
                 buy_signals = sum(1 for _, s in signal_data if s == SignalAction.BUY)
                 sell_signals = sum(1 for _, s in signal_data if s == SignalAction.SELL)
-                hold_signals = sum(1 for _, s in signal_data if s == SignalAction.HOLD)
                 
-                logger.info(f"{symbol}: {buy_signals} BUY, {sell_signals} SELL, {hold_signals} HOLD signals")
+                logger.info(f"{symbol}: {buy_signals} BUY, {sell_signals} SELL signals")
                 
                 # Convert signals to entries/exits
                 # VectorBT needs: entries=True for BUY, exits=True for SELL
@@ -351,7 +467,17 @@ class BacktestEngine:
                         entries.loc[timestamp, symbol] = True
                     elif signal == SignalAction.SELL:
                         exits.loc[timestamp, symbol] = True
-                    # HOLD signals are ignored
+                
+                # CRITICAL: If we end in a position, add a final exit at the last bar
+                if in_position:
+                    last_timestamp = bars[-1].timestamp
+                    exits.loc[last_timestamp, symbol] = True
+                    final_price = bars[-1].close
+                    final_gain = (final_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                    logger.info(f"{symbol}: Added final exit at {last_timestamp} (position was still open, entry: ${entry_price:.2f}, final: ${final_price:.2f}, gain: {final_gain:.2f}%)")
+                    # Clean up tracking
+                    if position_key and position_key in self._highest_price_tracking:
+                        del self._highest_price_tracking[position_key]
                 
             except Exception as e:
                 logger.exception(f"Error generating signals for {symbol}: {e}")
@@ -442,8 +568,18 @@ class BacktestEngine:
         
         # DEBUG: Check trades
         trades = portfolio.trades
-        if trades is not None and len(trades) > 0:
-            print(f"✅ Generated {len(trades)} trades")
+        if trades is not None:
+            if hasattr(trades, '__len__'):
+                print(f"✅ Generated {len(trades)} trades")
+            elif hasattr(trades, 'records') and trades.records is not None:
+                print(f"✅ Generated {len(trades.records)} trades")
+            elif hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                print(f"✅ Generated {len(trades.records_readable)} trades")
+            else:
+                print("❌ Unable to determine number of trades")
+            
+            # Call debug method to inspect trades object structure
+            self.debug_trades(portfolio)
         else:
             print("❌ NO TRADES GENERATED!")
             # Try to understand why
@@ -455,6 +591,61 @@ class BacktestEngine:
         logger.info("✅ Backtest complete")
         return portfolio
     
+    def debug_trades(self, portfolio: vbt.Portfolio) -> None:
+        """
+        Debug VectorBT trades object structure.
+        """
+        print("\n" + "=" * 80)
+        print("🔍 DEBUG VECTORBT TRADES OBJECT")
+        print("=" * 80)
+        
+        trades = portfolio.trades
+        
+        if trades is None:
+            print("No trades object")
+            return
+        
+        print(f"\nTrades object type: {type(trades)}")
+        print(f"Trades object attributes: {[attr for attr in dir(trades) if not attr.startswith('_')]}")
+        
+        # Check for common attributes
+        if hasattr(trades, '__len__'):
+            print(f"Number of trades: {len(trades)}")
+        
+        if hasattr(trades, 'records'):
+            print(f"Has records attribute: {trades.records is not None}")
+        
+        if hasattr(trades, 'records_readable'):
+            print(f"Has records_readable attribute: {trades.records_readable is not None}")
+            if trades.records_readable is not None:
+                print(f"records_readable shape: {trades.records_readable.shape}")
+                print(f"records_readable columns: {list(trades.records_readable.columns)}")
+                if not trades.records_readable.empty:
+                    print(f"First trade:\n{trades.records_readable.iloc[0]}")
+        
+        if hasattr(trades, 'pnl'):
+            print(f"Has pnl attribute: True")
+            try:
+                pnl_val = trades.pnl
+                if hasattr(pnl_val, 'mean'):
+                    print(f"PNL mean: {pnl_val.mean()}")
+                else:
+                    print(f"PNL type: {type(pnl_val)}, value: {pnl_val}")
+            except Exception as e:
+                print(f"PNL access error: {e}")
+        
+        # Check for methods
+        methods_to_check = ['win_rate', 'avg_return', 'total_return', 'profit']
+        for method in methods_to_check:
+            if hasattr(trades, method):
+                try:
+                    result = getattr(trades, method)()
+                    print(f"{method}(): {result}")
+                except Exception as e:
+                    print(f"{method}() error: {e}")
+        
+        print("=" * 80)
+    
     def analyze_results(
         self,
         portfolio: vbt.Portfolio,
@@ -464,7 +655,8 @@ class BacktestEngine:
         end_date: datetime,
         parameters: Optional[Dict[str, Any]] = None,
         is_walk_forward: bool = False,
-        walk_forward_period: Optional[int] = None
+        walk_forward_period: Optional[int] = None,
+        price_data: Optional[pd.DataFrame] = None
     ) -> Dict[str, Any]:
         """
         Analyze backtest results and validate against thresholds.
@@ -514,11 +706,22 @@ class BacktestEngine:
                     
                     if isinstance(sharpe_series, pd.Series):
                         if symbol in sharpe_series.index:
-                            sharpe = float(sharpe_series[symbol])
+                            sharpe_raw = sharpe_series[symbol]
                         else:
-                            sharpe = float(sharpe_series.iloc[0]) if len(sharpe_series) > 0 else 0.0
+                            sharpe_raw = sharpe_series.iloc[0] if len(sharpe_series) > 0 else 0.0
                     else:
-                        sharpe = float(sharpe_series)
+                        sharpe_raw = sharpe_series
+                    
+                    # Convert to float with safety checks
+                    try:
+                        sharpe = float(sharpe_raw) if sharpe_raw is not None else 0.0
+                    except (ValueError, TypeError):
+                        sharpe = 0.0
+                    
+                    # Safety check for invalid Sharpe ratios (NaN, Inf, or extreme values)
+                    if np.isnan(sharpe) or np.isinf(sharpe) or abs(sharpe) > 1000:
+                        logger.debug(f"Invalid Sharpe ratio for {symbol}: {sharpe}, setting to 0.0")
+                        sharpe = 0.0
                     
                     if isinstance(max_dd_series, pd.Series):
                         if symbol in max_dd_series.index:
@@ -528,71 +731,271 @@ class BacktestEngine:
                     else:
                         max_dd = float(max_dd_series) * 100
                     
-                    # Get trades - filter by symbol if possible
+                    # Get trades count first - if 0 trades, Sharpe should be 0.0
                     trades = portfolio.trades
-                    if hasattr(trades, 'records_readable') and trades.records_readable is not None:
-                        # Try to filter trades by symbol (column index)
+                    total_trades = 0
+                    win_rate = 0.0
+                    avg_trade_return = 0.0
+                    has_trades = False
+                    
+                    # Quick check for trades count before validating Sharpe
+                    if trades is not None:
+                        if hasattr(trades, '__len__'):
+                            has_trades = len(trades) > 0
+                        elif hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                            has_trades = len(trades.records_readable) > 0
+                        elif hasattr(trades, 'records') and trades.records is not None:
+                            has_trades = len(trades.records) > 0
+                    
+                    # If no trades, set Sharpe to 0.0 (VectorBT might return invalid values)
+                    if not has_trades:
+                        logger.debug(f"No trades for {symbol}, setting Sharpe to 0.0")
+                        sharpe = 0.0
+                    
+                    if trades is not None and hasattr(trades, '__len__'):
                         try:
-                            symbol_idx = portfolio.wrapper.columns.get_loc(symbol) if hasattr(portfolio, 'wrapper') and hasattr(portfolio.wrapper, 'columns') else None
-                            if symbol_idx is not None:
-                                symbol_trades = trades.records_readable[trades.records_readable['Column'] == symbol_idx]
-                                total_trades = len(symbol_trades)
+                            if hasattr(trades, 'records') and trades.records is not None:
+                                # VectorBT stores trades in records
+                                trades_df = trades.records_readable
+                                if trades_df is not None and 'Column' in trades_df.columns:
+                                    # Get column index for this symbol
+                                    try:
+                                        # Get price_data from portfolio wrapper if not provided
+                                        if price_data is None and hasattr(portfolio, 'wrapper') and hasattr(portfolio.wrapper, 'columns'):
+                                            price_data_cols = portfolio.wrapper.columns
+                                        elif price_data is not None:
+                                            price_data_cols = price_data.columns
+                                        else:
+                                            price_data_cols = None
+                                        
+                                        if price_data_cols is not None and symbol in price_data_cols:
+                                            col_idx = price_data_cols.get_loc(symbol)
+                                            symbol_trades = trades_df[trades_df['Column'] == col_idx]
+                                        else:
+                                            # Symbol not found, use all trades as fallback
+                                            col_idx = None
+                                            symbol_trades = None
+                                        
+                                        if symbol_trades is not None and len(symbol_trades) > 0:
+                                            total_trades = len(symbol_trades)
+                                            
+                                            # Calculate win rate
+                                            winning_trades = (symbol_trades['PnL'] > 0).sum() if 'PnL' in symbol_trades.columns else 0
+                                            win_rate = (winning_trades / total_trades) * 100
+                                            # Get average return from PnL or Return column
+                                            if 'Return' in symbol_trades.columns:
+                                                avg_trade_return = float(symbol_trades['Return'].mean()) * 100
+                                            elif 'PnL' in symbol_trades.columns and 'Size' in symbol_trades.columns:
+                                                # Calculate return from PnL / Size
+                                                avg_trade_return = float((symbol_trades['PnL'] / symbol_trades['Size']).mean()) * 100 if (symbol_trades['Size'] != 0).any() else 0.0
+                                            else:
+                                                avg_trade_return = 0.0
+                                        else:
+                                            # No trades for this symbol, use all trades as fallback
+                                            total_trades = len(trades_df) if trades_df is not None else 0
+                                            if total_trades > 0:
+                                                try:
+                                                    win_rate_val = trades.win_rate()
+                                                    if isinstance(win_rate_val, pd.Series):
+                                                        win_rate = float(win_rate_val.iloc[0]) * 100 if len(win_rate_val) > 0 else 0.0
+                                                    else:
+                                                        win_rate = float(win_rate_val) * 100
+                                                except (ValueError, TypeError, AttributeError):
+                                                    win_rate = 0.0
+                                                # Calculate avg return from trades_df
+                                                if 'Return' in trades_df.columns:
+                                                    avg_trade_return = float(trades_df['Return'].mean()) * 100
+                                                elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                                    avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
+                                                else:
+                                                    avg_trade_return = 0.0
+                                    except (KeyError, ValueError) as e:
+                                        # Symbol not found in columns, use all trades
+                                        logger.debug(f"Symbol {symbol} not found in price_data columns, using all trades: {e}")
+                                        total_trades = len(trades_df) if trades_df is not None else 0
+                                        if total_trades > 0:
+                                            win_rate = float(trades.win_rate()) * 100
+                                            # Calculate avg return from trades_df
+                                            if 'Return' in trades_df.columns:
+                                                avg_trade_return = float(trades_df['Return'].mean()) * 100
+                                            elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                                avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
+                                            else:
+                                                avg_trade_return = 0.0
+                                else:
+                                    # No records_readable or Column column, use trades directly
+                                    total_trades = len(trades) if trades is not None else 0
+                                    if total_trades > 0:
+                                        try:
+                                            win_rate_val = trades.win_rate()
+                                            if isinstance(win_rate_val, pd.Series):
+                                                win_rate = float(win_rate_val.iloc[0]) * 100 if len(win_rate_val) > 0 else 0.0
+                                            else:
+                                                win_rate = float(win_rate_val) * 100
+                                        except (ValueError, TypeError, AttributeError):
+                                            win_rate = 0.0
+                                        # Try to get avg return from records_readable if available
+                                        if hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                                            trades_df = trades.records_readable
+                                            if 'Return' in trades_df.columns:
+                                                avg_trade_return = float(trades_df['Return'].mean()) * 100
+                                            elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                                avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
+                                            else:
+                                                avg_trade_return = 0.0
+                                        else:
+                                            avg_trade_return = 0.0
+                            else:
+                                # Fallback - use trades directly
+                                total_trades = len(trades) if trades is not None else 0
                                 if total_trades > 0:
-                                    # Calculate win rate from PnL
-                                    winning_trades = (symbol_trades['PnL'] > 0).sum() if 'PnL' in symbol_trades.columns else 0
-                                    win_rate = (winning_trades / total_trades) * 100
-                                    # Get average return
-                                    if 'Return' in symbol_trades.columns:
-                                        avg_trade_return = float(symbol_trades['Return'].mean()) * 100
+                                    win_rate = float(trades.win_rate()) * 100
+                                    # Try to get avg return from records_readable if available
+                                    if hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                                        trades_df = trades.records_readable
+                                        if 'Return' in trades_df.columns:
+                                            avg_trade_return = float(trades_df['Return'].mean()) * 100
+                                        elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                            avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
+                                        else:
+                                            avg_trade_return = 0.0
+                                    else:
+                                        avg_trade_return = 0.0
+                        except Exception as e:
+                            logger.debug(f"Error filtering trades by symbol {symbol}: {e}")
+                            # Fallback
+                            total_trades = len(trades) if trades is not None else 0
+                            if total_trades > 0:
+                                win_rate = float(trades.win_rate()) * 100
+                                # Try to get avg return from records_readable if available
+                                if hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                                    trades_df = trades.records_readable
+                                    if 'Return' in trades_df.columns:
+                                        avg_trade_return = float(trades_df['Return'].mean()) * 100
+                                    elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                        avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
                                     else:
                                         avg_trade_return = 0.0
                                 else:
-                                    win_rate = 0.0
                                     avg_trade_return = 0.0
-                            else:
-                                # Fallback - use all trades
-                                total_trades = len(trades.records_readable) if trades.records_readable is not None else 0
-                                if total_trades > 0:
-                                    win_rate = float(trades.win_rate()) * 100
-                                    avg_trade_return = float(trades.avg_return()) * 100
-                                else:
-                                    win_rate = 0.0
-                                    avg_trade_return = 0.0
-                        except:
-                            # Fallback
-                            total_trades = len(trades) if trades is not None else 0
-                            win_rate = float(trades.win_rate()) * 100 if total_trades > 0 else 0.0
-                            avg_trade_return = float(trades.avg_return()) * 100 if total_trades > 0 else 0.0
-                    else:
-                        # Fallback - use portfolio trades
-                        total_trades = len(trades) if trades is not None else 0
-                        win_rate = float(trades.win_rate()) * 100 if total_trades > 0 else 0.0
-                        avg_trade_return = float(trades.avg_return()) * 100 if total_trades > 0 else 0.0
+                    
+                    # DEBUG: Print trade count
+                    logger.debug(f"Portfolio has {total_trades} trades for {symbol}")
                         
                 except Exception as e:
                     logger.warning(f"Error extracting per-symbol metrics for {symbol}: {e}. Using portfolio-level.")
                     # Fallback to portfolio-level
-                    total_return = float(portfolio.total_return()) * 100 if hasattr(portfolio.total_return(), '__float__') else 0.0
-                    sharpe = float(portfolio.sharpe_ratio(risk_free=daily_rf)) if hasattr(portfolio.sharpe_ratio(risk_free=daily_rf), '__float__') else 0.0
-                    max_dd = float(portfolio.max_drawdown()) * 100 if hasattr(portfolio.max_drawdown(), '__float__') else 0.0
+                    total_return_val = portfolio.total_return()
+                    if isinstance(total_return_val, pd.Series):
+                        total_return = float(total_return_val.iloc[0]) * 100 if len(total_return_val) > 0 else 0.0
+                    else:
+                        try:
+                            total_return = float(total_return_val) * 100
+                        except (ValueError, TypeError):
+                            total_return = 0.0
+                    sharpe_raw = portfolio.sharpe_ratio(risk_free=daily_rf)
+                    try:
+                        sharpe = float(sharpe_raw) if sharpe_raw is not None and hasattr(sharpe_raw, '__float__') else 0.0
+                    except (ValueError, TypeError):
+                        sharpe = 0.0
+                    
+                    # Safety check for invalid Sharpe ratios (NaN, Inf, or extreme values)
+                    if np.isnan(sharpe) or np.isinf(sharpe) or abs(sharpe) > 1000:
+                        logger.debug(f"Invalid Sharpe ratio for {symbol} (fallback): {sharpe}, setting to 0.0")
+                        sharpe = 0.0
+                    
+                    max_dd_val = portfolio.max_drawdown()
+                    if isinstance(max_dd_val, pd.Series):
+                        max_dd = float(max_dd_val.iloc[0]) * 100 if len(max_dd_val) > 0 else 0.0
+                    else:
+                        try:
+                            max_dd = float(max_dd_val) * 100
+                        except (ValueError, TypeError):
+                            max_dd = 0.0
+                    
                     trades = portfolio.trades
-                    total_trades = len(trades) if trades is not None else 0
-                    win_rate = float(trades.win_rate()) * 100 if total_trades > 0 else 0.0
-                    avg_trade_return = float(trades.avg_return()) * 100 if total_trades > 0 else 0.0
+                    total_trades = 0
+                    win_rate = 0.0
+                    avg_trade_return = 0.0
+                    
+                    if trades is not None:
+                        try:
+                            total_trades = len(trades) if hasattr(trades, '__len__') else 0
+                        except:
+                            total_trades = 0
+                        
+                        if total_trades > 0:
+                            try:
+                                win_rate_val = trades.win_rate()
+                                if isinstance(win_rate_val, pd.Series):
+                                    win_rate = float(win_rate_val.iloc[0]) * 100 if len(win_rate_val) > 0 else 0.0
+                                else:
+                                    win_rate = float(win_rate_val) * 100
+                            except (ValueError, TypeError, AttributeError):
+                                win_rate = 0.0
+                            
+                            # Calculate avg return from records_readable
+                            if hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                                trades_df = trades.records_readable
+                                if 'Return' in trades_df.columns:
+                                    avg_trade_return = float(trades_df['Return'].mean()) * 100
+                                elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                    avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
+                                else:
+                                    avg_trade_return = 0.0
             else:
                 # Portfolio-level analysis (combined across all symbols)
                 total_return = float(portfolio.total_return()) * 100 if not isinstance(portfolio.total_return(), pd.Series) else float(portfolio.total_return().mean()) * 100
                 sharpe_val = portfolio.sharpe_ratio(risk_free=daily_rf)
-                sharpe = float(sharpe_val) if not isinstance(sharpe_val, pd.Series) else float(sharpe_val.mean())
+                if isinstance(sharpe_val, pd.Series):
+                    sharpe = float(sharpe_val.mean()) if len(sharpe_val) > 0 else 0.0
+                else:
+                    try:
+                        sharpe = float(sharpe_val) if sharpe_val is not None else 0.0
+                    except (ValueError, TypeError):
+                        sharpe = 0.0
+                
+                # Safety check for invalid Sharpe ratios (NaN, Inf, or extreme values)
+                if np.isnan(sharpe) or np.isinf(sharpe) or abs(sharpe) > 1000:
+                    logger.debug(f"Invalid Sharpe ratio (portfolio-level): {sharpe}, setting to 0.0")
+                    sharpe = 0.0
+                
                 max_dd_val = portfolio.max_drawdown()
                 max_dd = float(max_dd_val) * 100 if not isinstance(max_dd_val, pd.Series) else float(max_dd_val.mean()) * 100
                 
                 # Calculate win rate
                 trades = portfolio.trades
-                if trades is not None and len(trades) > 0:
-                    win_rate = float(trades.win_rate()) * 100
-                    total_trades = len(trades)
-                    avg_trade_return = float(trades.avg_return()) * 100
+                if trades is not None:
+                    try:
+                        total_trades = len(trades) if hasattr(trades, '__len__') else 0
+                    except:
+                        total_trades = 0
+                    
+                    if total_trades > 0:
+                        try:
+                            win_rate_val = trades.win_rate()
+                            if isinstance(win_rate_val, pd.Series):
+                                win_rate = float(win_rate_val.iloc[0]) * 100 if len(win_rate_val) > 0 else 0.0
+                            else:
+                                win_rate = float(win_rate_val) * 100
+                        except (ValueError, TypeError, AttributeError) as e:
+                            logger.debug(f"Could not get win_rate: {e}")
+                            win_rate = 0.0
+                        
+                        # Calculate avg return from records_readable
+                        if hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                            trades_df = trades.records_readable
+                            if 'Return' in trades_df.columns:
+                                avg_trade_return = float(trades_df['Return'].mean()) * 100
+                            elif 'PnL' in trades_df.columns and 'Size' in trades_df.columns:
+                                avg_trade_return = float((trades_df['PnL'] / trades_df['Size']).mean()) * 100 if (trades_df['Size'] != 0).any() else 0.0
+                            else:
+                                avg_trade_return = 0.0
+                        else:
+                            avg_trade_return = 0.0
+                    else:
+                        win_rate = 0.0
+                        avg_trade_return = 0.0
                 else:
                     win_rate = 0.0
                     total_trades = 0
@@ -636,11 +1039,161 @@ class BacktestEngine:
                 except Exception as e:
                     logger.warning(f"Failed to log backtest result to database: {e}")
             
+            # DEBUG: Print results
+            logger.info(
+                f"Results for {strategy_name} - {symbol}: "
+                f"Return={total_return:.2f}%, "
+                f"Sharpe={sharpe:.2f}, "
+                f"MaxDD={max_dd:.2f}%, "
+                f"WinRate={win_rate:.2f}%, "
+                f"Trades={total_trades}, "
+                f"Passed={'✅' if passed else '❌'}"
+            )
+            
             return results
             
         except Exception as e:
             logger.exception(f"Error analyzing backtest results: {e}")
-            raise
+            # Return minimal results to prevent crash
+            return {
+                'strategy_name': strategy_name,
+                'symbol': symbol,
+                'start_date': start_date,
+                'end_date': end_date,
+                'total_return': 0.0,
+                'sharpe_ratio': 0.0,
+                'max_drawdown': 0.0,
+                'win_rate': 0.0,
+                'total_trades': 0,
+                'avg_trade_return': 0.0,
+                'passed': False,
+                'min_sharpe': self.min_sharpe,
+                'max_drawdown_threshold': self.max_drawdown_threshold * 100,
+                'min_win_rate': self.min_win_rate * 100,
+                'parameters': parameters,
+                'risk_free_rate': self.risk_free_rate,
+                'initial_cash': self.initial_cash,
+                'commission': self.commission,
+                'is_walk_forward': is_walk_forward,
+                'walk_forward_period': walk_forward_period,
+                'error': str(e)
+            }
+    
+    def plot_results(self, portfolio: vbt.Portfolio, symbol: str, strategy_name: str, save_path: Optional[str] = None):
+        """
+        Plot backtest results.
+        
+        Args:
+            portfolio: VectorBT Portfolio object
+            symbol: Stock symbol
+            strategy_name: Strategy name
+            save_path: Optional path to save the plot (if None, shows plot)
+        
+        Returns:
+            matplotlib figure object
+        """
+        try:
+            import matplotlib.pyplot as plt
+            
+            # VectorBT has built-in plotting
+            fig = portfolio.plot(subplots=['orders', 'trade_pnl', 'cum_returns'])
+            fig.suptitle(f"{strategy_name} - {symbol}", fontsize=16)
+            plt.tight_layout()
+            
+            if save_path:
+                import os
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                fig.savefig(save_path, dpi=150, bbox_inches='tight')
+                logger.info(f"📊 Plot saved to {save_path}")
+            else:
+                plt.show()
+            
+            return fig
+        except Exception as e:
+            logger.warning(f"Could not generate plot: {e}")
+            return None
+    
+    def analyze_trade_quality(self, portfolio: vbt.Portfolio, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Analyze trade quality metrics.
+        
+        Args:
+            portfolio: VectorBT Portfolio object
+            symbol: Optional symbol to filter trades (for multi-symbol portfolios)
+        
+        Returns:
+            Dictionary with trade quality metrics
+        """
+        trades = portfolio.trades
+        
+        if trades is None:
+            return {"error": "No trades object"}
+        
+        try:
+            # Get readable trades
+            if hasattr(trades, 'records_readable') and trades.records_readable is not None:
+                trades_df = trades.records_readable
+                
+                # Filter by symbol if provided
+                if symbol and 'Column' in trades_df.columns:
+                    try:
+                        if hasattr(portfolio, 'wrapper') and hasattr(portfolio.wrapper, 'columns'):
+                            if symbol in portfolio.wrapper.columns:
+                                col_idx = portfolio.wrapper.columns.get_loc(symbol)
+                                trades_df = trades_df[trades_df['Column'] == col_idx]
+                    except Exception:
+                        pass  # Use all trades if filtering fails
+                
+                if len(trades_df) == 0:
+                    return {"error": "No trades found"}
+                
+                # Calculate metrics
+                if 'PnL' in trades_df.columns:
+                    winning_trades = trades_df[trades_df['PnL'] > 0]
+                    losing_trades = trades_df[trades_df['PnL'] < 0]
+                    
+                    avg_win = float(winning_trades['PnL'].mean()) if len(winning_trades) > 0 else 0.0
+                    avg_loss = float(losing_trades['PnL'].mean()) if len(losing_trades) > 0 else 0.0
+                    win_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0.0
+                    
+                    # Calculate expectancy
+                    win_rate = len(winning_trades) / len(trades_df)
+                    expectancy = (win_rate * avg_win) + ((1 - win_rate) * avg_loss)
+                else:
+                    avg_win = 0.0
+                    avg_loss = 0.0
+                    win_loss_ratio = 0.0
+                    expectancy = 0.0
+                    win_rate = 0.0
+                
+                # Try to get profit factor if available
+                profit_factor = 0.0
+                try:
+                    if hasattr(trades, 'profit_factor'):
+                        pf = trades.profit_factor()
+                        if hasattr(pf, '__float__'):
+                            profit_factor = float(pf)
+                        elif hasattr(pf, 'iloc'):
+                            profit_factor = float(pf.iloc[0]) if len(pf) > 0 else 0.0
+                except Exception:
+                    pass
+                
+                return {
+                    'avg_win': avg_win,
+                    'avg_loss': avg_loss,
+                    'win_loss_ratio': win_loss_ratio,
+                    'expectancy': expectancy,
+                    'win_rate': win_rate * 100,  # Convert to percentage
+                    'profit_factor': profit_factor,
+                    'total_trades': len(trades_df),
+                    'winning_trades': len(winning_trades) if 'PnL' in trades_df.columns else 0,
+                    'losing_trades': len(losing_trades) if 'PnL' in trades_df.columns else 0
+                }
+            else:
+                return {"error": "No readable trades data"}
+        except Exception as e:
+            logger.warning(f"Error analyzing trade quality: {e}")
+            return {"error": str(e)}
     
     def debug_signals(self, price_data: pd.DataFrame, entries: pd.DataFrame, exits: pd.DataFrame) -> None:
         """

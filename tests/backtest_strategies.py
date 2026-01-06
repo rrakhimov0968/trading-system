@@ -228,7 +228,19 @@ def run_all_strategies(
         
         # Calculate averages across symbols
         returns = [r['total_return'] for r in results.values()]
-        sharpes = [r['sharpe_ratio'] for r in results.values()]
+        # Filter out invalid Sharpe ratios (NaN, Inf, or extreme values)
+        sharpes = []
+        for r in results.values():
+            sharpe_val = r.get('sharpe_ratio', 0.0)
+            # Check for valid Sharpe ratio (not NaN, Inf, or extreme)
+            if sharpe_val is not None and not (isinstance(sharpe_val, float) and (sharpe_val != sharpe_val or abs(sharpe_val) > 1000)):
+                try:
+                    sharpe_float = float(sharpe_val)
+                    if not (sharpe_float != sharpe_float or abs(sharpe_float) > 1000):  # Check for NaN and extreme values
+                        sharpes.append(sharpe_float)
+                except (ValueError, TypeError):
+                    pass  # Skip invalid values
+        
         passed = sum(1 for r in results.values() if r['passed'])
         
         avg_return = sum(returns) / len(returns) if returns else 0.0

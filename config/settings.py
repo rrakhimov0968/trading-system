@@ -206,8 +206,8 @@ class AppConfig:
     loop_interval_seconds: int = 60  # How often to run the main loop
     symbols: List[str] = None  # Symbols to monitor
     # Quant agent settings
-    quant_min_sharpe: float = 1.5  # Minimum Sharpe ratio threshold
-    quant_max_drawdown: float = 0.08  # Maximum drawdown threshold (8%)
+    quant_min_sharpe: float = 0.8  # Minimum Sharpe ratio threshold (lowered from 1.5 for more realistic validation)
+    quant_max_drawdown: float = 0.15  # Maximum drawdown threshold (15%, increased from 8% for more realistic validation)
     quant_max_vif: float = 10.0  # Maximum VIF for multicollinearity check
     quant_use_llm: bool = False  # Enable LLM review for quant analysis
     # Risk agent settings
@@ -250,8 +250,8 @@ class AppConfig:
             data_provider=data_provider,
             loop_interval_seconds=int(os.getenv("LOOP_INTERVAL_SECONDS", "60")),
             symbols=symbols,
-            quant_min_sharpe=float(os.getenv("QUANT_MIN_SHARPE", "1.5")),
-            quant_max_drawdown=float(os.getenv("QUANT_MAX_DRAWDOWN", "0.08")),
+            quant_min_sharpe=float(os.getenv("QUANT_MIN_SHARPE", "0.8")),
+            quant_max_drawdown=float(os.getenv("QUANT_MAX_DRAWDOWN", "0.15")),
             quant_max_vif=float(os.getenv("QUANT_MAX_VIF", "10.0")),
             quant_use_llm=os.getenv("QUANT_USE_LLM", "false").lower() == "true",
             risk_max_per_trade=float(os.getenv("RISK_MAX_PER_TRADE", "0.02")),

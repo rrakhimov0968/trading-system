@@ -109,7 +109,8 @@ class StrategyBacktester:
                         symbol=symbol,
                         start_date=pd.to_datetime(start_date),
                         end_date=pd.to_datetime(end_date) if end_date else datetime.now(),
-                        parameters=self.strategy_config
+                        parameters=self.strategy_config,
+                        price_data=price_data
                     )
                     results[symbol] = symbol_results
                 except Exception as e:
@@ -126,7 +127,8 @@ class StrategyBacktester:
                 symbol="PORTFOLIO",
                 start_date=pd.to_datetime(start_date),
                 end_date=pd.to_datetime(end_date) if end_date else datetime.now(),
-                parameters=self.strategy_config
+                parameters=self.strategy_config,
+                price_data=price_data
             )
             return {"PORTFOLIO": combined_results}
 

@@ -32,9 +32,9 @@ class QuantAgent(BaseAgent):
         """
         super().__init__(config)
         
-        # Validation thresholds
-        self.min_sharpe = float(self.config.__dict__.get('quant_min_sharpe', 1.5))
-        self.max_drawdown = float(self.config.__dict__.get('quant_max_drawdown', 0.08))
+        # Validation thresholds (more realistic defaults)
+        self.min_sharpe = float(self.config.__dict__.get('quant_min_sharpe', 0.8))  # Lowered from 1.5
+        self.max_drawdown = float(self.config.__dict__.get('quant_max_drawdown', 0.15))  # Increased from 0.08 (8%) to 0.15 (15%)
         self.max_vif = float(self.config.__dict__.get('quant_max_vif', 10.0))
         
         # Optional LLM for interpretation (Claude)

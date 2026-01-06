@@ -88,4 +88,38 @@ class BaseStrategy(ABC):
         if reason:
             msg += f": {reason}"
         self.logger.debug(msg)
+    
+    def apply_stop_loss(self, entry_price: float, current_price: float, stop_loss_pct: float = 0.08) -> bool:
+        """
+        Apply stop-loss to limit drawdown.
+        
+        Args:
+            entry_price: Entry price of the position
+            current_price: Current market price
+            stop_loss_pct: Stop-loss percentage (default: 8% = 0.08)
+        
+        Returns:
+            True if stop-loss is hit, False otherwise
+        """
+        return current_price <= entry_price * (1 - stop_loss_pct)
+    
+    def apply_take_profit(self, entry_price: float, current_price: float, take_profit_pct: float = 0.15) -> bool:
+        """
+        Apply take-profit to lock in gains.
+        
+        Args:
+            entry_price: Entry price of the position
+            current_price: Current market price
+            take_profit_pct: Take-profit percentage (default: 15% = 0.15)
+        
+        Returns:
+            True if take-profit is hit, False otherwise
+        """
+        return current_price >= entry_price * (1 + take_profit_pct)
+    
+    def reset_position_state(self):
+        """Reset position tracking state. Useful for backtesting."""
+        # Note: Position state tracking should be handled by the backtesting framework
+        # This method is provided for strategies that want to track state internally
+        pass
 
