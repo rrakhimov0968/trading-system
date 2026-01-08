@@ -20,6 +20,7 @@ from utils.exceptions import TradingSystemError
 from utils.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from core.market_hours import is_market_open, get_market_status_message
 from core.position_manager import PositionManager
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,10 @@ class TradingSystemOrchestrator:
             "recent_signals": [],
             "recent_equity_values": []
         }
+        
+        # Initialize order tracker to prevent duplicate orders
+        from core.order_tracker import OrderTracker
+        self.order_tracker = OrderTracker(cooldown_minutes=1440)  # 24 hour cooldown
         
         # Initialize agents
         logger.info("Initializing agents...")
@@ -213,6 +218,131 @@ class TradingSystemOrchestrator:
                 f"(kept {len(self.all_signals)}/{self.MAX_SIGNALS_STORED} max)"
             )
     
+    def check_emergency_stop(self) -> bool:
+        """
+        Check if emergency stop file exists.
+        
+        Returns:
+            True if emergency stop is active, False otherwise
+        """
+        stop_file = Path("EMERGENCY_STOP")
+        
+        if stop_file.exists():
+            logger.error(
+                "🚨 EMERGENCY STOP ACTIVE - NOT PLACING ANY ORDERS! "
+                "Remove EMERGENCY_STOP file to resume trading."
+            )
+            return True
+        
+        return False
+    
+    def validate_account_health(self, account) -> bool:
+        """
+        Validate account is in good state before trading.
+        
+        Args:
+            account: Account object from broker
+        
+        Returns:
+            True if account is healthy, False otherwise
+        """
+        try:
+            equity = float(account.equity) if hasattr(account, 'equity') else 0.0
+            cash = float(account.cash) if hasattr(account, 'cash') else 0.0
+            buying_power = float(account.buying_power) if hasattr(account, 'buying_power') else 0.0
+            
+            # Check 1: Equity hasn't dropped more than 20% from initial
+            initial_equity = float(os.getenv("INITIAL_ACCOUNT_EQUITY", "100000"))
+            if equity > 0 and initial_equity > 0:
+                current_drawdown = (initial_equity - equity) / initial_equity
+                
+                if current_drawdown > 0.20:
+                    logger.error(
+                        f"🚫 ACCOUNT DRAWDOWN TOO HIGH: {current_drawdown:.1%} "
+                        f"(Equity: ${equity:,.0f} vs Initial: ${initial_equity:,.0f})"
+                    )
+                    return False
+            
+            # Check 2: Have enough cash for at least 1 position
+            min_cash_needed = equity * 0.15 if equity > 0 else 0.0  # Need at least 15% in cash
+            if cash < min_cash_needed:
+                logger.warning(
+                    f"⚠️  LOW CASH: ${cash:,.0f} < ${min_cash_needed:,.0f} "
+                    f"(15% of equity)"
+                )
+                # Don't block, just warn
+            
+            # Check 3: Not on margin call
+            if buying_power < 0:
+                logger.error("🚫 NEGATIVE BUYING POWER - MARGIN CALL RISK!")
+                return False
+            
+            logger.info(
+                f"✅ Account Health: Equity=${equity:,.0f}, Cash=${cash:,.0f}, "
+                f"Buying Power=${buying_power:,.0f}"
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating account health: {e}", exc_info=True)
+            return False
+    
+    def reconcile_positions(self) -> None:
+        """
+        Verify system's understanding of positions matches broker.
+        Run this once per iteration to detect manual closes/opens.
+        """
+        logger.info("🔍 Reconciling positions with broker...")
+        
+        try:
+            # Get positions from broker
+            alpaca_positions = self.execution_agent.get_positions()
+            alpaca_symbols = {pos.symbol for pos in alpaca_positions}
+            
+            # Get positions from order tracker (symbols we've placed orders for)
+            tracked_symbols = set(self.order_tracker.last_order_time.keys())
+            
+            # Check for mismatches
+            missing_in_alpaca = tracked_symbols - alpaca_symbols
+            missing_in_tracker = alpaca_symbols - tracked_symbols
+            
+            if missing_in_alpaca:
+                logger.warning(
+                    f"⚠️  Tracked positions not in broker: {missing_in_alpaca} "
+                    f"(May have been manually closed)"
+                )
+                # Clear from tracker
+                for symbol in missing_in_alpaca:
+                    self.order_tracker.clear_tracking(symbol)
+            
+            if missing_in_tracker:
+                logger.warning(
+                    f"⚠️  Broker positions not tracked: {missing_in_tracker} "
+                    f"(May have been manually opened)"
+                )
+                # Add to tracker to prevent duplicate orders
+                for symbol in missing_in_tracker:
+                    self.order_tracker.record_order(symbol)
+            
+            # Log position values
+            total_position_value = sum(
+                float(pos.qty) * float(pos.current_price)
+                for pos in alpaca_positions
+                if hasattr(pos, 'qty') and hasattr(pos, 'current_price')
+            )
+            
+            account = self.execution_agent.get_account()
+            equity = float(account.equity) if account and hasattr(account, 'equity') else 0.0
+            position_pct = (total_position_value / equity * 100) if equity > 0 else 0
+            
+            logger.info(
+                f"✅ Positions reconciled: {len(alpaca_positions)} positions, "
+                f"${total_position_value:,.0f} ({position_pct:.1f}% of equity)"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error reconciling positions: {e}", exc_info=True)
+    
     def _run_iteration(self) -> None:
         """Run a single iteration of the trading loop."""
         # Check circuit breaker before starting iteration
@@ -230,6 +360,26 @@ class TradingSystemOrchestrator:
         logger.info("-" * 60)
         logger.info(f"Iteration {self.iteration} started at {iteration_start.isoformat()}")
         logger.info("-" * 60)
+        
+        # Check emergency stop first
+        if self.check_emergency_stop():
+            logger.error("🚨 EMERGENCY STOP ACTIVE - Skipping iteration")
+            return
+        
+        # Reconcile positions with broker (once per iteration)
+        self.reconcile_positions()
+        
+        # Validate account health before proceeding
+        try:
+            account = self.execution_agent.get_account()
+            if not self.validate_account_health(account):
+                logger.error("🚫 Account health check failed - STOPPING TRADING")
+                self.monitoring_metrics["failed_iterations"] += 1
+                return
+        except Exception as e:
+            logger.error(f"Failed to validate account health: {e}", exc_info=True)
+            self.monitoring_metrics["failed_iterations"] += 1
+            return
         
         # Check if market is open before running full pipeline
         if not is_market_open():
@@ -395,6 +545,16 @@ class TradingSystemOrchestrator:
             # Step 5: Execution Agent executes approved trades
             if signals:
                 logger.info("Step 5: Executing approved trades...")
+                
+                # CRITICAL: Get current positions to prevent duplicate orders
+                try:
+                    current_positions = self.execution_agent.get_positions()
+                    position_symbols = {pos.symbol for pos in current_positions}
+                    logger.info(f"Current open positions: {', '.join(position_symbols) if position_symbols else 'None'}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch positions: {e}. Proceeding with caution.")
+                    position_symbols = set()
+                
                 executed_count = 0
                 for signal in signals:
                     if signal.action == SignalAction.HOLD:
@@ -405,6 +565,63 @@ class TradingSystemOrchestrator:
                         execution_time=datetime.now()
                     )
                     
+                    # CRITICAL FIX 1: Check for existing positions before BUY
+                    if signal.action == SignalAction.BUY:
+                        # Check if we already have a position
+                        if signal.symbol in position_symbols:
+                            logger.warning(
+                                f"🚫 SKIPPING BUY order for {signal.symbol}: "
+                                f"Already have an open position. "
+                                f"This prevents duplicate orders and over-leveraging."
+                            )
+                            execution_result.executed = False
+                            execution_result.error = "Position already exists"
+                            execution_results.append(execution_result)
+                            continue
+                        
+                        # CRITICAL FIX 4: Check order cooldown (prevent multiple orders per day)
+                        can_place, reason = self.order_tracker.can_place_order(signal.symbol)
+                        if not can_place:
+                            logger.warning(
+                                f"🚫 SKIPPING BUY order for {signal.symbol}: {reason}"
+                            )
+                            execution_result.executed = False
+                            execution_result.error = reason
+                            execution_results.append(execution_result)
+                            continue
+                    
+                    # CRITICAL FIX 2: Check we have position before SELL
+                    elif signal.action == SignalAction.SELL:
+                        if signal.symbol not in position_symbols:
+                            logger.warning(
+                                f"🚫 SKIPPING SELL order for {signal.symbol}: "
+                                f"No open position found. Cannot sell what we don't own."
+                            )
+                            execution_result.executed = False
+                            execution_result.error = "No position to sell"
+                            execution_results.append(execution_result)
+                            continue
+                    
+                    # CRITICAL FIX 3: Validate position sizing
+                    if signal.action == SignalAction.BUY and signal.qty:
+                        try:
+                            account = self.execution_agent.get_account()
+                            account_value = float(account.equity) if hasattr(account, 'equity') else float(account.cash)
+                            position_value = signal.qty * (signal.price or 0)
+                            
+                            if position_value > account_value * 0.25:  # Max 25% per position
+                                logger.error(
+                                    f"🚫 SKIPPING BUY order for {signal.symbol}: "
+                                    f"Position size ${position_value:,.2f} exceeds 25% of account "
+                                    f"(${account_value:,.2f}). This is a safety check."
+                                )
+                                execution_result.executed = False
+                                execution_result.error = f"Position size too large: ${position_value:,.2f} > ${account_value * 0.25:,.2f}"
+                                execution_results.append(execution_result)
+                                continue
+                        except Exception as e:
+                            logger.warning(f"Could not validate position size for {signal.symbol}: {e}")
+                    
                     try:
                         order_request = {
                             "symbol": signal.symbol,
@@ -413,6 +630,10 @@ class TradingSystemOrchestrator:
                             "order_type": "market"
                         }
                         
+                        logger.info(
+                            f"Placing {signal.action.value} order: {signal.qty or 1} shares of {signal.symbol}"
+                        )
+                        
                         result = self.execution_agent.process(order_request)
                         execution_result.order_id = result.get('order_id')
                         execution_result.executed = True
@@ -420,8 +641,19 @@ class TradingSystemOrchestrator:
                         executed_count += 1
                         
                         logger.info(
-                            f"Order executed for {signal.symbol}: {result.get('order_id', 'N/A')}"
+                            f"✅ Order executed for {signal.symbol}: {result.get('order_id', 'N/A')}"
                         )
+                        
+                        # Update position tracking after successful order
+                        if signal.action == SignalAction.BUY:
+                            position_symbols.add(signal.symbol)
+                            # Record order to prevent duplicates within cooldown period
+                            self.order_tracker.record_order(signal.symbol)
+                        elif signal.action == SignalAction.SELL:
+                            position_symbols.discard(signal.symbol)
+                            # Clear tracking after SELL so we can buy again later
+                            self.order_tracker.clear_tracking(signal.symbol)
+                            
                     except Exception as e:
                         execution_result.executed = False
                         execution_result.error = str(e)

@@ -75,6 +75,62 @@ class BacktestEngine:
             f"Max DD={self.max_drawdown_threshold:.1%}"
         )
     
+    @staticmethod
+    def _normalize_symbol_for_provider(symbol: str, provider) -> str:
+        """
+        Normalize symbol format for the specific data provider.
+        
+        Different providers use different formats:
+        - Alpaca: BRK.B (dot)
+        - Yahoo Finance: BRK-B (hyphen)
+        - Polygon: Usually dots
+        
+        Args:
+            symbol: Original symbol (may have hyphen or dot)
+            provider: DataProvider enum value
+            
+        Returns:
+            Normalized symbol for the provider
+        """
+        from config.settings import DataProvider
+        
+        # Common symbols that need normalization
+        # Map: {yahoo_format: alpaca_format}
+        symbol_map = {
+            'BRK-B': 'BRK.B',
+            'BF-B': 'BF.B',
+        }
+        
+        # If provider is Alpaca, convert hyphens to dots
+        if provider == DataProvider.ALPACA:
+            # Check if we have a known mapping
+            if symbol in symbol_map:
+                return symbol_map[symbol]
+            # Otherwise, convert hyphen to dot (e.g., BRK-B -> BRK.B)
+            if '-' in symbol:
+                return symbol.replace('-', '.')
+        
+        # For Yahoo Finance, convert dots to hyphens
+        elif provider == DataProvider.YAHOO:
+            # Check reverse mapping
+            reverse_map = {v: k for k, v in symbol_map.items()}
+            if symbol in reverse_map:
+                return reverse_map[symbol]
+            # Otherwise, convert dot to hyphen (e.g., BRK.B -> BRK-B)
+            if '.' in symbol:
+                return symbol.replace('.', '-')
+        
+        # For Polygon or other providers, keep as-is or use dots
+        # Polygon typically uses dots like Alpaca
+        elif provider == DataProvider.POLYGON:
+            if symbol in symbol_map:
+                return symbol_map[symbol]
+            if '-' in symbol:
+                return symbol.replace('-', '.')
+        
+        # Default: return as-is
+        return symbol
+    
     def fetch_data(
         self,
         symbols: List[str],
@@ -83,19 +139,28 @@ class BacktestEngine:
         timeframe: str = "1Day"
     ) -> pd.DataFrame:
         """
-        Fetch historical price data using yfinance via VectorBT.
+        Fetch historical price data using DataAgent.
         
         Args:
             symbols: List of stock symbols
             start_date: Start date (YYYY-MM-DD or datetime)
             end_date: End date (YYYY-MM-DD or datetime, defaults to today)
-            timeframe: Bar timeframe (currently only supports "1Day")
+            timeframe: Bar timeframe. Supported: "1Min", "5Min", "15Min", "1Hour", "1Day"
+                      - "1Day" (default): Daily bars, uses end-of-day prices
+                      - "1Hour": Hourly bars, allows intraday trading and better exit timing
+                      - "15Min", "5Min", "1Min": Higher frequency for more granular analysis
         
         Returns:
-            DataFrame with Close prices (symbols as columns, dates as index)
+            DataFrame with Close prices (symbols as columns, timestamps as index)
         
         Raises:
             ValueError: If data fetching fails
+        
+        Note:
+            - Daily bars: ~252 bars per year (trading days only)
+            - Hourly bars: ~6.5 hours per trading day × 252 days ≈ 1,638 bars per year
+            - With hourly data, strategies can execute trades during market hours for better prices
+            - Hourly data requires more API calls and storage but provides better backtest accuracy
         """
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
@@ -136,20 +201,51 @@ class BacktestEngine:
             start_dt = pd.to_datetime(start_date)
             end_dt = pd.to_datetime(end_date) if end_date else dt.now()
             
-            # Calculate limit based on date range (rough estimate: 252 trading days per year)
+            # Calculate limit based on date range and timeframe
             days_diff = (end_dt - start_dt).days
-            limit = min(int(days_diff * 1.5), 1000)  # Add buffer, cap at 1000
+            
+            # Adjust limit based on timeframe
+            if timeframe == "1Day":
+                # Daily: ~252 trading days per year
+                limit = min(int(days_diff * 1.5), 1000)
+            elif timeframe == "1Hour":
+                # Hourly: ~6.5 hours per trading day × ~252 days ≈ 1,638 bars per year
+                # But we'll fetch for all days (including weekends for hourly data)
+                bars_per_day = 24  # Hourly bars per calendar day
+                limit = min(int(days_diff * bars_per_day * 1.2), 10000)  # Cap at 10k for hourly
+            elif timeframe in ["15Min", "5Min"]:
+                # 15-min: 4 per hour × 24 hours = 96 per day
+                # 5-min: 12 per hour × 24 hours = 288 per day
+                bars_per_hour = 4 if timeframe == "15Min" else 12
+                bars_per_day = bars_per_hour * 24
+                limit = min(int(days_diff * bars_per_day * 1.2), 50000)
+            elif timeframe == "1Min":
+                # 1-min: 60 per hour × 24 hours = 1,440 per day
+                bars_per_day = 60 * 24
+                limit = min(int(days_diff * bars_per_day * 1.2), 100000)
+            else:
+                # Default to daily calculation
+                limit = min(int(days_diff * 1.5), 1000)
+            
+            logger.info(f"Calculated limit for {timeframe} timeframe: {limit} bars")
             
             # Fetch each symbol individually with strict_validation=False for backtesting
             # This allows stale historical data which is normal for backtesting
             data_frames = {}
             for symbol in symbols:
                 try:
+                    # Normalize symbol for the data provider
+                    # Alpaca uses dots (BRK.B), Yahoo uses hyphens (BRK-B)
+                    normalized_symbol = self._normalize_symbol_for_provider(
+                        symbol, 
+                        data_agent.provider
+                    )
+                    
                     # Use _fetch_data() directly with strict_validation=False
                     # This allows historical/stale data which is expected for backtesting
                     market_data = data_agent._fetch_data(
-                        symbol=symbol,
-                        timeframe="1Day",
+                        symbol=normalized_symbol,
+                        timeframe=timeframe,  # Use the specified timeframe (1Hour, 1Day, etc.)
                         start_date=start_dt,
                         end_date=end_dt,
                         limit=limit,
@@ -159,14 +255,16 @@ class BacktestEngine:
                     if market_data and market_data.bars:
                         df = market_data.to_dataframe()
                         if not df.empty:
+                            # Use original symbol as key (not normalized_symbol)
+                            # This ensures consistency with the rest of the code
                             data_frames[symbol] = df
-                            logger.debug(f"Fetched {len(df)} bars for {symbol} via DataAgent (strict_validation=False)")
+                            logger.debug(f"Fetched {len(df)} bars for {symbol} (normalized: {normalized_symbol}) via DataAgent")
                         else:
-                            logger.warning(f"Empty DataFrame for {symbol}")
+                            logger.warning(f"Empty DataFrame for {symbol} (normalized: {normalized_symbol})")
                     else:
-                        logger.warning(f"No bars returned for {symbol}")
+                        logger.warning(f"No bars returned for {symbol} (normalized: {normalized_symbol})")
                 except Exception as symbol_error:
-                    logger.warning(f"Failed to fetch {symbol}: {symbol_error}")
+                    logger.warning(f"Failed to fetch {symbol} (normalized: {normalized_symbol}): {symbol_error}")
                     continue
             
             if not data_frames:
@@ -334,7 +432,14 @@ class BacktestEngine:
                 position_key = None
                 
                 # Get lookback period (default to 200 for strategies that need MA200, or 50 minimum)
+                # For hourly data, adjust: 200 daily bars ≈ 200 trading days, but hourly bars need more
                 lookback_period = getattr(strategy, 'lookback_period', 200)
+                
+                # Adjust min_bars based on timeframe
+                # Daily: 200 bars = 200 trading days
+                # Hourly: If strategy needs 200 daily bars, we need ~200 hours (assuming ~6.5 hours/day)
+                # But strategies typically work with the same lookback regardless of timeframe
+                # So if strategy needs 200 bars for MA200, use 200 bars at any timeframe
                 min_bars = max(lookback_period, 50)  # At least 50 bars, or strategy's lookback
                 
                 # Process each bar sequentially to simulate live trading

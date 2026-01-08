@@ -127,7 +127,9 @@ class RiskAgent(BaseAgent):
                 self.enforce_rules(signal)
                 
                 # Calculate position sizing
-                self.calculate_position_sizing(signal)
+                # Use equal weight allocation (recommended - matches backtesting assumptions)
+                num_symbols = len(self.config.symbols) if self.config.symbols else 5
+                self.calculate_position_sizing(signal, num_symbols=num_symbols, use_equal_weight=True)
                 
                 # Mark as approved
                 signal.approved = True
@@ -201,19 +203,28 @@ class RiskAgent(BaseAgent):
         
         self.log_debug(f"Risk rules check passed for {signal.symbol}")
     
-    def calculate_position_sizing(self, signal: TradingSignal) -> None:
+    def calculate_position_sizing(self, signal: TradingSignal, num_symbols: int = 5, use_equal_weight: bool = True) -> None:
         """
         Calculate position size based on risk and confidence.
         
-        Position sizing:
-        - Base risk: max_risk_per_trade * account_balance * confidence
-        - Stop distance: ATR-based (1.5x ATR)
-        - Quantity: risk_amount / stop_distance_per_share
+        Position sizing methods:
+        1. Equal Weight (recommended for backtesting compatibility):
+           - Allocate equal % of account to each symbol
+           - Position value = account_balance / num_symbols
+           - Max position % = 20% (safety limit)
+           - Quantity = position_value / current_price
+        
+        2. Risk-Based (ATR-based, original method):
+           - Base risk: max_risk_per_trade * account_balance * confidence
+           - Stop distance: ATR-based (1.5x ATR)
+           - Quantity: risk_amount / stop_distance_per_share
         
         After calculation, validates against max_risk_per_trade and daily limits.
         
         Args:
             signal: TradingSignal to size
+            num_symbols: Number of symbols being traded (for equal weight allocation)
+            use_equal_weight: If True, use equal weight allocation (recommended)
         
         Raises:
             RiskCheckError: If sizing violates risk rules
@@ -226,60 +237,115 @@ class RiskAgent(BaseAgent):
                 details={"confidence": signal.confidence, "min_confidence": self.min_confidence}
             )
         
-        if signal.historical_data is None or signal.historical_data.empty:
-            raise RiskCheckError(
-                "No historical data for position sizing",
-                correlation_id=self._correlation_id
+        if use_equal_weight:
+            # EQUAL WEIGHT POSITION SIZING (recommended)
+            # This matches what backtesting typically assumes
+            # Allocate equal % of account to each symbol, max 20% per position
+            
+            if signal.price is None or signal.price <= 0:
+                raise RiskCheckError(
+                    f"Price required for equal weight position sizing: {signal.price}",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Calculate equal weight position value
+            max_position_pct = 0.20  # Max 20% per position (safety limit)
+            equal_weight_value = self._account_balance / num_symbols
+            max_position_value = self._account_balance * max_position_pct
+            
+            # Use the smaller of equal weight or max position %
+            position_value = min(equal_weight_value, max_position_value)
+            
+            # Calculate quantity (round down to avoid over-allocation)
+            qty = int(position_value / signal.price)
+            
+            if qty < 1:
+                raise RiskCheckError(
+                    f"Calculated quantity < 1: {qty} (position_value=${position_value:.2f}, price=${signal.price:.2f})",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Calculate actual risk (using ATR if available, otherwise 15% stop-loss as fallback)
+            if signal.historical_data is not None and not signal.historical_data.empty:
+                try:
+                    df = signal.historical_data.copy()
+                    if len(df) >= 14 and all(col in df.columns for col in ['high', 'low', 'close']):
+                        atr = calculate_atr(df['high'], df['low'], df['close'], period=14).iloc[-1]
+                        if not pd.isna(atr):
+                            stop_distance = atr * 1.5
+                        else:
+                            stop_distance = signal.price * 0.15  # 15% fallback
+                    else:
+                        stop_distance = signal.price * 0.15  # 15% fallback
+                except:
+                    stop_distance = signal.price * 0.15  # 15% fallback
+            else:
+                stop_distance = signal.price * 0.15  # 15% fallback
+            
+            actual_risk_amount = qty * stop_distance
+            
+            self.log_info(
+                f"Equal weight position sizing for {signal.symbol}: "
+                f"${position_value:,.2f} / ${signal.price:.2f} = {qty} shares "
+                f"(risk: ${actual_risk_amount:,.2f})"
             )
-        
-        df = signal.historical_data.copy()
-        
-        # Ensure we have required columns
-        required_cols = ['high', 'low', 'close']
-        if not all(col in df.columns for col in required_cols):
-            raise RiskCheckError(
-                "Missing required columns (high, low, close) for position sizing",
-                correlation_id=self._correlation_id
-            )
-        
-        # Calculate ATR for stop distance
-        if len(df) < 14:
-            # Fallback: use simple high-low range
-            atr = (df['high'] - df['low']).mean()
         else:
-            try:
-                atr = calculate_atr(df['high'], df['low'], df['close'], period=14).iloc[-1]
-                if pd.isna(atr):
-                    atr = (df['high'] - df['low']).mean()
-            except Exception as e:
-                self.log_warning(f"ATR calculation failed for {signal.symbol}, using fallback: {e}")
+            # RISK-BASED POSITION SIZING (ATR-based, original method)
+            if signal.historical_data is None or signal.historical_data.empty:
+                raise RiskCheckError(
+                    "No historical data for risk-based position sizing",
+                    correlation_id=self._correlation_id
+                )
+            
+            df = signal.historical_data.copy()
+            
+            # Ensure we have required columns
+            required_cols = ['high', 'low', 'close']
+            if not all(col in df.columns for col in required_cols):
+                raise RiskCheckError(
+                    "Missing required columns (high, low, close) for position sizing",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Calculate ATR for stop distance
+            if len(df) < 14:
+                # Fallback: use simple high-low range
                 atr = (df['high'] - df['low']).mean()
+            else:
+                try:
+                    atr = calculate_atr(df['high'], df['low'], df['close'], period=14).iloc[-1]
+                    if pd.isna(atr):
+                        atr = (df['high'] - df['low']).mean()
+                except Exception as e:
+                    self.log_warning(f"ATR calculation failed for {signal.symbol}, using fallback: {e}")
+                    atr = (df['high'] - df['low']).mean()
+            
+            # Stop distance per share (conservative: 1.5x ATR)
+            stop_distance = atr * 1.5
+            
+            if stop_distance <= 0:
+                raise RiskCheckError(
+                    f"Invalid stop distance calculated: {stop_distance}",
+                    correlation_id=self._correlation_id
+                )
+            
+            # Base risk amount (scaled by confidence)
+            # Higher confidence = larger position, but still capped at max_risk_per_trade
+            risk_amount = self.max_risk_per_trade * self._account_balance * signal.confidence
+            
+            # Ensure risk doesn't exceed absolute maximum
+            max_risk_absolute = self.max_risk_per_trade * self._account_balance
+            risk_amount = min(risk_amount, max_risk_absolute)
+            
+            # Calculate quantity: risk_amount / stop_distance_per_share
+            qty = risk_amount / stop_distance
+            actual_risk_amount = risk_amount
         
-        # Stop distance per share (conservative: 1.5x ATR)
-        stop_distance = atr * 1.5
-        
-        if stop_distance <= 0:
-            raise RiskCheckError(
-                f"Invalid stop distance calculated: {stop_distance}",
-                correlation_id=self._correlation_id
-            )
-        
-        # Base risk amount (scaled by confidence)
-        # Higher confidence = larger position, but still capped at max_risk_per_trade
-        risk_amount = self.max_risk_per_trade * self._account_balance * signal.confidence
-        
-        # Ensure risk doesn't exceed absolute maximum
-        max_risk_absolute = self.max_risk_per_trade * self._account_balance
-        risk_amount = min(risk_amount, max_risk_absolute)
-        
-        # Calculate quantity: risk_amount / stop_distance_per_share
-        qty = risk_amount / stop_distance
-        
-        # Clamp to reasonable bounds
-        qty = max(1, min(int(qty), self.max_qty))
-        
-        # Recalculate actual risk with integer qty
-        actual_risk_amount = qty * stop_distance
+        # Clamp to reasonable bounds (only for risk-based sizing)
+        if not use_equal_weight:
+            qty = max(1, min(int(qty), self.max_qty))
+            # Recalculate actual risk with integer qty
+            actual_risk_amount = qty * stop_distance
         
         # Validate against max risk per trade (Rule 2)
         if actual_risk_amount > max_risk_absolute:

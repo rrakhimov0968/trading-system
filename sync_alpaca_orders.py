@@ -56,38 +56,94 @@ def sync_alpaca_orders_to_db(
         # Get orders from Alpaca
         from alpaca.trading.enums import QueryOrderStatus
         
-        start_time = datetime.now() - timedelta(days=days)
-        
-        logger.info(f"Fetching orders from Alpaca since {start_time}...")
+        # If days is 0, don't filter by date (fetch all orders)
+        start_time = None
+        if days > 0:
+            start_time = datetime.now() - timedelta(days=days)
+            logger.info(f"Fetching orders from Alpaca since {start_time} (last {days} days)...")
+        else:
+            logger.info("Fetching ALL orders from Alpaca (no date filter)...")
         
         # Access the TradingClient from ExecutionAgent
         trading_client = execution_agent.client
         
         # Convert status filter to QueryOrderStatus if provided
+        # Alpaca QueryOrderStatus enum values might be different from string values
+        # Common values: NEW, ACCEPTED, PENDING_NEW, ACCEPTED_FOR_BIDDING, PENDING_REPLACE,
+        #                PENDING_CANCEL, STOPPED, REJECTED, SUSPENDED, EXPIRED, CANCELED, 
+        #                REPLACED, PARTIALLY_FILLED, FILLED
         status_list = None
         if status_filter:
-            status_list = [QueryOrderStatus(status.strip().upper()) for status in status_filter.split(',')]
+            try:
+                # Try to map common status strings to QueryOrderStatus enum
+                status_mapping = {
+                    'filled': 'FILLED',
+                    'partially_filled': 'PARTIALLY_FILLED',
+                    'new': 'NEW',
+                    'accepted': 'ACCEPTED',
+                    'canceled': 'CANCELED',
+                    'cancelled': 'CANCELED',  # Handle both spellings
+                    'rejected': 'REJECTED',
+                    'expired': 'EXPIRED',
+                    'pending': 'PENDING_NEW',
+                    'pending_new': 'PENDING_NEW',
+                    'pending_replace': 'PENDING_REPLACE',
+                    'pending_cancel': 'PENDING_CANCEL',
+                }
+                
+                status_list = []
+                for status_str in status_filter.split(','):
+                    status_str = status_str.strip().lower()
+                    # Try direct mapping first
+                    if status_str in status_mapping:
+                        mapped_status = status_mapping[status_str]
+                        try:
+                            status_list.append(QueryOrderStatus[mapped_status])
+                        except (KeyError, AttributeError):
+                            # If enum doesn't have that value, try as-is
+                            logger.warning(f"Could not map status '{status_str}' to QueryOrderStatus, will filter in code")
+                            status_list.append(None)
+                    else:
+                        # Try uppercase version directly
+                        try:
+                            status_list.append(QueryOrderStatus[status_str.upper()])
+                        except (KeyError, AttributeError):
+                            logger.warning(f"Invalid status '{status_str}', will filter in code")
+                            status_list.append(None)
+                
+                # Filter out None values
+                status_list = [s for s in status_list if s is not None]
+                if not status_list:
+                    status_list = None
+                    logger.warning(f"Could not map any valid statuses, fetching all orders and filtering in code")
+                    
+            except Exception as e:
+                logger.warning(f"Error mapping status filter: {e}, will fetch all orders and filter in code")
+                status_list = None
         
         # Fetch orders from Alpaca
-        # Alpaca Python SDK get_orders() accepts: status, after (datetime or ISO string), until
+        # Fetch all orders and filter in code (simpler and more reliable)
         try:
-            # Try using 'after' parameter for date filtering (if supported)
-            try:
-                if status_list:
-                    orders = trading_client.get_orders(
-                        status=status_list,
-                        after=start_time
-                    )
-                else:
-                    orders = trading_client.get_orders(after=start_time)
-            except TypeError:
-                # 'after' parameter might not be supported or needs different format
-                # Fall back to fetching all orders and filtering in code
-                logger.info("'after' parameter not supported, fetching all orders and filtering in code")
-                if status_list:
-                    orders = trading_client.get_orders(status=status_list)
-                else:
-                    orders = trading_client.get_orders()
+            logger.info("Fetching all orders from Alpaca (will filter by date/status in code)...")
+            orders = trading_client.get_orders()
+            logger.info(f"Retrieved {len(orders)} total orders from Alpaca")
+            
+            # Debug: Print some order details if available
+            if orders and len(orders) > 0:
+                logger.info(f"Sample order info (first order):")
+                first_order = orders[0]
+                logger.info(f"  - Order ID: {first_order.id if hasattr(first_order, 'id') else 'N/A'}")
+                logger.info(f"  - Symbol: {first_order.symbol if hasattr(first_order, 'symbol') else 'N/A'}")
+                logger.info(f"  - Status: {first_order.status if hasattr(first_order, 'status') else 'N/A'}")
+                if hasattr(first_order, 'created_at'):
+                    logger.info(f"  - Created: {first_order.created_at}")
+                if hasattr(first_order, 'filled_at'):
+                    logger.info(f"  - Filled: {first_order.filled_at}")
+            else:
+                logger.warning("No orders retrieved from Alpaca. This might be normal if:")
+                logger.warning("  - You have no orders in your account")
+                logger.warning("  - Orders are in a different account (paper vs live)")
+                logger.warning("  - You need to check your Alpaca API credentials")
         except Exception as e:
             logger.error(f"Failed to fetch orders from Alpaca: {e}")
             logger.exception("Full error details:")
@@ -95,9 +151,23 @@ def sync_alpaca_orders_to_db(
         
         logger.info(f"Found {len(orders)} orders from Alpaca")
         
-        # Alpaca API filters by date using 'after' parameter, so we should already have filtered orders
-        # But let's double-check and filter in code as well for safety
+        # Filter orders by status if we couldn't use QueryOrderStatus enum
+        # Also filter by date as a safety check
         filtered_orders = []
+        desired_statuses = set()
+        if status_filter:
+            # Store desired statuses for filtering
+            status_mapping = {
+                'filled': ['filled'],
+                'partially_filled': ['partially_filled', 'partially filled'],
+            }
+            for status_str in status_filter.split(','):
+                status_str = status_str.strip().lower()
+                if status_str in status_mapping:
+                    desired_statuses.update(status_mapping[status_str])
+                else:
+                    desired_statuses.add(status_str)
+        
         for order in orders:
             # Check order creation/submission date
             order_date = None
@@ -116,30 +186,76 @@ def sync_alpaca_orders_to_db(
                 except:
                     order_date = None
             
-            # Filter by date
-            if order_date:
-                # Compare dates (handle timezone-aware and naive datetimes)
-                if hasattr(order_date, 'replace'):
-                    # Make both timezone-naive for comparison
-                    if hasattr(order_date, 'tzinfo') and order_date.tzinfo:
-                        order_date_naive = order_date.replace(tzinfo=None)
+            # Filter by date (if start_time is set)
+            if start_time:
+                if order_date:
+                    # Compare dates (handle timezone-aware and naive datetimes)
+                    if hasattr(order_date, 'replace'):
+                        # Make both timezone-naive for comparison
+                        if hasattr(order_date, 'tzinfo') and order_date.tzinfo:
+                            order_date_naive = order_date.replace(tzinfo=None)
+                        else:
+                            order_date_naive = order_date
+                        
+                        if hasattr(start_time, 'tzinfo') and start_time.tzinfo:
+                            start_time_naive = start_time.replace(tzinfo=None)
+                        else:
+                            start_time_naive = start_time
+                        
+                        if order_date_naive >= start_time_naive:
+                            # Check status filter if we're filtering in code
+                            if desired_statuses:
+                                order_status = None
+                                if hasattr(order, 'status'):
+                                    order_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+                                    order_status = order_status.lower()
+                                
+                                if order_status and order_status in desired_statuses:
+                                    filtered_orders.append(order)
+                                # else: skip this order (status doesn't match)
+                            else:
+                                # No status filter, include all orders in date range
+                                filtered_orders.append(order)
+                        # else: order is too old, skip it
+                else:
+                    # If we can't compare dates, check if we should include based on status only
+                    if desired_statuses:
+                        order_status = None
+                        if hasattr(order, 'status'):
+                            order_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+                            order_status = order_status.lower()
+                        if order_status and order_status in desired_statuses:
+                            filtered_orders.append(order)
                     else:
-                        order_date_naive = order_date
-                    
-                    if hasattr(start_time, 'tzinfo') and start_time.tzinfo:
-                        start_time_naive = start_time.replace(tzinfo=None)
+                        # Include orders without dates if no status filter (shouldn't happen, but be safe)
+                        logger.warning(f"Order {order.id if hasattr(order, 'id') else 'unknown'} has no date field - including anyway")
+                        filtered_orders.append(order)
+            else:
+                # Order has no date - include it if:
+                # 1. No date filter (days=0) OR
+                # 2. Status matches (if status filter is set)
+                if not start_time:
+                    # No date filter, check status filter
+                    if desired_statuses:
+                        order_status = None
+                        if hasattr(order, 'status'):
+                            order_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+                            order_status = order_status.lower()
+                        if order_status and order_status in desired_statuses:
+                            filtered_orders.append(order)
                     else:
-                        start_time_naive = start_time
-                    
-                    if order_date_naive >= start_time_naive:
+                        # No date filter, no status filter - include all
                         filtered_orders.append(order)
                 else:
-                    # If we can't compare, include the order (shouldn't happen)
-                    filtered_orders.append(order)
-            else:
-                # Include orders without dates (shouldn't happen, but be safe)
-                logger.warning(f"Order {order.id if hasattr(order, 'id') else 'unknown'} has no date field - including anyway")
-                filtered_orders.append(order)
+                    # Date filter is set but order has no date - only include if status matches
+                    if desired_statuses:
+                        order_status = None
+                        if hasattr(order, 'status'):
+                            order_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+                            order_status = order_status.lower()
+                        if order_status and order_status in desired_statuses:
+                            logger.warning(f"Order {order.id if hasattr(order, 'id') else 'unknown'} has no date field but matches status filter - including")
+                            filtered_orders.append(order)
         
         logger.info(f"Filtered to {len(filtered_orders)} orders within date range")
         stats['total_orders'] = len(filtered_orders)
@@ -204,8 +320,13 @@ def sync_alpaca_orders_to_db(
                         fill_price = float(order.limit_price)
                     
                     # Determine if executed
-                    order_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
-                    executed = order_status in ['filled', 'partially_filled']
+                    order_status_str = None
+                    if hasattr(order, 'status'):
+                        if hasattr(order.status, 'value'):
+                            order_status_str = str(order.status.value).lower()
+                        else:
+                            order_status_str = str(order.status).lower()
+                    executed = order_status_str in ['filled', 'partially_filled'] if order_status_str else False
                     
                     # Create a minimal signal for logging
                     # We'll use "SYNCED" as strategy name to indicate this was synced from Alpaca
@@ -280,7 +401,7 @@ Examples:
         '--days',
         type=int,
         default=7,
-        help='Number of days to look back (default: 7)'
+        help='Number of days to look back (default: 7). Use 0 to fetch all orders without date filter.'
     )
     parser.add_argument(
         '--status',

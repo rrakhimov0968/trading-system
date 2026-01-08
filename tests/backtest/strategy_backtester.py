@@ -49,32 +49,41 @@ class StrategyBacktester:
         symbols: List[str],
         start_date: str,
         end_date: Optional[str] = None,
-        per_symbol: bool = True
+        per_symbol: bool = True,
+        timeframe: str = "1Day"
     ) -> Dict[str, Any]:
         """
         Run backtest for strategy on given symbols.
-        
-        Added debug calls.
         
         Args:
             symbols: List of stock symbols to test
             start_date: Start date (YYYY-MM-DD)
             end_date: End date (YYYY-MM-DD, defaults to today)
             per_symbol: If True, returns results per symbol. If False, portfolio-level
+            timeframe: Bar timeframe. Options: "1Day" (default), "1Hour", "15Min", "5Min", "1Min"
+                      Use "1Hour" for intraday trading and better exit timing
         
         Returns:
             Dictionary with backtest results
         """
-        # Fetch data
-        price_data = self.engine.fetch_data(symbols, start_date, end_date)
+        # Fetch data with specified timeframe
+        price_data = self.engine.fetch_data(symbols, start_date, end_date, timeframe=timeframe)
         
         if price_data.empty:
             raise ValueError("No data fetched for backtesting")
         
-        print(f"\n📈 DATA LOADED:")
+        print(f"\n📈 DATA LOADED ({timeframe} timeframe):")
         print(f"  Symbols: {list(price_data.columns)}")
         print(f"  Period: {price_data.index[0]} to {price_data.index[-1]}")
-        print(f"  Days: {len(price_data)}")
+        print(f"  Total Bars: {len(price_data)}")
+        if timeframe == "1Day":
+            print(f"  Trading Days: {len(price_data)}")
+        elif timeframe == "1Hour":
+            days = (price_data.index[-1] - price_data.index[0]).days
+            print(f"  Calendar Days: ~{days}")
+            print(f"  Hours: {len(price_data)}")
+        else:
+            print(f"  Bars: {len(price_data)}")
         
         # Generate signals using existing strategy class
         entries, exits = self.engine.generate_signals_from_strategy(
