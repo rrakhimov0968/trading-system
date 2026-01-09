@@ -217,6 +217,20 @@ class AppConfig:
     risk_max_qty: int = 1000  # Maximum shares per trade
     risk_default_account_balance: float = 10000.0  # Default if can't fetch from broker
     risk_use_llm_advisor: bool = False  # Enable LLM advisor for explanations
+    # Tiered allocation settings
+    enable_tiered_allocation: bool = False  # Enable tiered position sizing
+    tier1_allocation: float = 0.40  # Tier 1 allocation (40%)
+    tier2_allocation: float = 0.30  # Tier 2 allocation (30%)
+    tier3_allocation: float = 0.30  # Tier 3 allocation (30%)
+    # Fractional shares settings
+    enable_fractional_shares: bool = True  # Enable fractional shares (required for < $25k accounts)
+    min_order_notional: float = 10.0  # Minimum order notional in dollars
+    # Scanner integration settings
+    use_scanner: bool = False  # Use scanner-driven symbol selection
+    scanner_file: str = "candidates.json"  # Scanner output file
+    max_gap_pct: float = 0.02  # Maximum price gap allowed (2%)
+    max_signal_age_hours: float = 24  # Maximum signal age in hours
+    baseline_symbols: List[str] = None  # Always monitor these symbols (SPY, QQQ)
     
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -259,7 +273,21 @@ class AppConfig:
             risk_min_confidence=float(os.getenv("RISK_MIN_CONFIDENCE", "0.3")),
             risk_max_qty=int(os.getenv("RISK_MAX_QTY", "1000")),
             risk_default_account_balance=float(os.getenv("RISK_DEFAULT_ACCOUNT_BALANCE", "10000.0")),
-            risk_use_llm_advisor=os.getenv("RISK_USE_LLM_ADVISOR", "false").lower() == "true"
+            risk_use_llm_advisor=os.getenv("RISK_USE_LLM_ADVISOR", "false").lower() == "true",
+            # Tiered allocation
+            enable_tiered_allocation=os.getenv("ENABLE_TIERED_ALLOCATION", "false").lower() == "true",
+            tier1_allocation=float(os.getenv("TIER1_ALLOCATION", "0.40")),
+            tier2_allocation=float(os.getenv("TIER2_ALLOCATION", "0.30")),
+            tier3_allocation=float(os.getenv("TIER3_ALLOCATION", "0.30")),
+            # Fractional shares
+            enable_fractional_shares=os.getenv("ENABLE_FRACTIONAL_SHARES", "true").lower() == "true",
+            min_order_notional=float(os.getenv("MIN_ORDER_NOTIONAL", "10.0")),
+            # Scanner integration
+            use_scanner=os.getenv("USE_SCANNER", "false").lower() == "true",
+            scanner_file=os.getenv("SCANNER_FILE", "candidates.json"),
+            max_gap_pct=float(os.getenv("MAX_GAP_PCT", "0.02")),
+            max_signal_age_hours=float(os.getenv("MAX_SIGNAL_AGE_HOURS", "24")),
+            baseline_symbols=[s.strip() for s in os.getenv("BASELINE_SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
         )
 
 

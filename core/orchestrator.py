@@ -20,7 +20,15 @@ from utils.exceptions import TradingSystemError
 from utils.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from core.market_hours import is_market_open, get_market_status_message
 from core.position_manager import PositionManager
+from core.orchestrator_integration import (
+    initialize_tier_tracker,
+    initialize_signal_validator,
+    initialize_tiered_sizer,
+    load_focus_symbols,
+    load_symbol_tier_mapping
+)
 from pathlib import Path
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +106,28 @@ class TradingSystemOrchestrator:
                 data_agent=self.data_agent,
                 database_manager=db_manager
             )
+            
+            # Initialize tier exposure tracker (if tiered allocation enabled)
+            self.tier_tracker = None
+            if config.enable_tiered_allocation:
+                try:
+                    self.tier_tracker = initialize_tier_tracker(config)
+                except Exception as e:
+                    logger.warning(f"Failed to initialize tier tracker: {e}")
+            
+            # Initialize signal validator (if scanner enabled)
+            self.signal_validator = None
+            if config.use_scanner:
+                try:
+                    self.signal_validator = initialize_signal_validator(config)
+                except Exception as e:
+                    logger.warning(f"Failed to initialize signal validator: {e}")
+            
+            # Tiered position sizer will be initialized after account value is known
+            self.tiered_sizer = None
+            
+            # Store symbol tier mapping for quick lookup
+            self.symbol_tier_mapping = load_symbol_tier_mapping(config)
             
             logger.info("All agents and PositionManager initialized successfully")
         except Exception as e:
@@ -392,8 +422,11 @@ class TradingSystemOrchestrator:
             # Step 1: Fetch market data
             logger.info("Step 1: Fetching market data...")
             try:
+                # Use focus symbols (scanner-driven or all configured)
+                symbols_to_fetch = load_focus_symbols(self.config)
+                
                 market_data = self.data_agent.process(
-                    symbols=self.config.symbols,
+                    symbols=symbols_to_fetch,
                     timeframe="1Day",
                     limit=252  # 1 year of trading days (252) to satisfy strategies that need 200+ bars
                 )
@@ -412,7 +445,7 @@ class TradingSystemOrchestrator:
                 return
             
             # Calculate data quality score (simple heuristic: % of symbols with data)
-            expected_symbols = len(self.config.symbols)
+            expected_symbols = len(symbols_to_fetch)
             received_symbols = len(market_data)
             data_quality = received_symbols / expected_symbols if expected_symbols > 0 else 0.0
             self.circuit_breaker.record_data_quality(data_quality)
@@ -553,7 +586,40 @@ class TradingSystemOrchestrator:
                     logger.info(f"Current open positions: {', '.join(position_symbols) if position_symbols else 'None'}")
                 except Exception as e:
                     logger.warning(f"Failed to fetch positions: {e}. Proceeding with caution.")
+                    current_positions = []
                     position_symbols = set()
+                
+                # Get account value for tier tracking and sizing
+                account_value = None
+                try:
+                    account_check = self.execution_agent.get_account()
+                    account_value = float(account_check.equity) if hasattr(account_check, 'equity') else float(account_check.cash)
+                    
+                    # Initialize tiered sizer if needed (and not already initialized)
+                    if self.config.enable_tiered_allocation and not self.tiered_sizer:
+                        self.tiered_sizer = initialize_tiered_sizer(self.config, account_value)
+                except Exception as e:
+                    logger.warning(f"Failed to get account value: {e}")
+                
+                # Calculate tier exposures if tier tracking enabled
+                tier_exposures = None
+                if self.tier_tracker and account_value:
+                    try:
+                        tier_exposures = self.tier_tracker.calculate_tier_exposure(current_positions, account_value)
+                        self.tier_tracker.log_tier_status(tier_exposures)
+                    except Exception as e:
+                        logger.warning(f"Failed to calculate tier exposures: {e}")
+                
+                # Load scanner data if using scanner
+                scanner_data = None
+                if self.config.use_scanner and self.signal_validator:
+                    scanner_file = Path(self.config.scanner_file)
+                    if scanner_file.exists():
+                        try:
+                            with open(scanner_file) as f:
+                                scanner_data = json.load(f)
+                        except Exception as e:
+                            logger.warning(f"Failed to load scanner data: {e}")
                 
                 executed_count = 0
                 for signal in signals:
@@ -589,6 +655,81 @@ class TradingSystemOrchestrator:
                             execution_result.error = reason
                             execution_results.append(execution_result)
                             continue
+                        
+                        # NEW: Tier exposure check (CRITICAL - prevents drift)
+                        if self.tier_tracker and tier_exposures and account_value:
+                            tier = self.tier_tracker.get_tier_for_symbol(signal.symbol)
+                            if tier:
+                                # Estimate proposed position value
+                                proposed_value = (signal.qty or 0) * (signal.price or 0)
+                                approved_tier, tier_reason = self.tier_tracker.check_tier_capacity(
+                                    tier,
+                                    proposed_value,
+                                    tier_exposures[tier],
+                                    account_value
+                                )
+                                
+                                if not approved_tier:
+                                    logger.warning(
+                                        f"🚫 SKIPPING BUY order for {signal.symbol}: Tier exposure check failed - {tier_reason}"
+                                    )
+                                    execution_result.executed = False
+                                    execution_result.error = f"Tier exposure: {tier_reason}"
+                                    execution_results.append(execution_result)
+                                    continue
+                        
+                        # NEW: Signal freshness check (if using scanner)
+                        if self.signal_validator and scanner_data:
+                            try:
+                                current_price = signal.price
+                                if current_price:
+                                    validation = self.signal_validator.validate_from_scanner_data(
+                                        signal.symbol,
+                                        current_price,
+                                        scanner_data
+                                    )
+                                    
+                                    if not validation.valid:
+                                        logger.warning(
+                                            f"🚫 SKIPPING BUY order for {signal.symbol}: Signal freshness check failed - {validation.reason}"
+                                        )
+                                        execution_result.executed = False
+                                        execution_result.error = f"Signal freshness: {validation.reason}"
+                                        execution_results.append(execution_result)
+                                        continue
+                            except Exception as e:
+                                logger.warning(f"Signal freshness check failed for {signal.symbol}: {e}")
+                        
+                        # NEW: Tiered position sizing (if enabled)
+                        if self.tiered_sizer and account_value:
+                            tier = self.symbol_tier_mapping.get(signal.symbol)
+                            if tier:
+                                try:
+                                    current_price = signal.price
+                                    if current_price:
+                                        shares, meta = self.tiered_sizer.calculate_shares(
+                                            signal.symbol,
+                                            current_price,
+                                            tier
+                                        )
+                                        
+                                        if shares and shares > 0:
+                                            signal.qty = shares if self.tiered_sizer.use_fractional else int(shares)
+                                            signal.price = current_price
+                                            logger.info(
+                                                f"📊 Tiered sizing for {signal.symbol}: {signal.qty:.4f} shares "
+                                                f"(${meta.get('position_notional', 0):,.2f} notional)"
+                                            )
+                                        else:
+                                            logger.warning(
+                                                f"🚫 SKIPPING BUY order for {signal.symbol}: Position sizing failed - {meta.get('reason', 'Unknown')}"
+                                            )
+                                            execution_result.executed = False
+                                            execution_result.error = f"Position sizing: {meta.get('reason', 'Failed')}"
+                                            execution_results.append(execution_result)
+                                            continue
+                                except Exception as e:
+                                    logger.warning(f"Tiered sizing failed for {signal.symbol}: {e}")
                     
                     # CRITICAL FIX 2: Check we have position before SELL
                     elif signal.action == SignalAction.SELL:
@@ -634,11 +775,43 @@ class TradingSystemOrchestrator:
                             f"Placing {signal.action.value} order: {signal.qty or 1} shares of {signal.symbol}"
                         )
                         
-                        result = self.execution_agent.process(order_request)
-                        execution_result.order_id = result.get('order_id')
-                        execution_result.executed = True
-                        execution_result.fill_price = signal.price
-                        executed_count += 1
+                        # Use fractional fallback if fractional shares enabled
+                        if self.config.enable_fractional_shares and signal.qty and signal.qty != int(signal.qty):
+                            # Use place_order_with_fallback for fractional shares
+                            try:
+                                from models.enums import OrderSide
+                                order_side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
+                                
+                                order = self.execution_agent.place_order_with_fallback(
+                                    signal.symbol,
+                                    signal.qty,
+                                    order_side,
+                                    'market'
+                                )
+                                
+                                if order:
+                                    execution_result.order_id = order.id if hasattr(order, 'id') else str(order)
+                                    execution_result.fill_price = getattr(order, 'filled_avg_price', None) or signal.price
+                                    execution_result.executed = True
+                                    executed_count += 1
+                                else:
+                                    execution_result.executed = False
+                                    execution_result.error = "Order returned None"
+                                    execution_results.append(execution_result)
+                                    continue
+                            except Exception as e:
+                                logger.error(f"Fractional order failed for {signal.symbol}: {e}, falling back to regular order")
+                                result = self.execution_agent.process(order_request)
+                                execution_result.order_id = result.get('order_id')
+                                execution_result.executed = True
+                                execution_result.fill_price = signal.price
+                                executed_count += 1
+                        else:
+                            result = self.execution_agent.process(order_request)
+                            execution_result.order_id = result.get('order_id')
+                            execution_result.executed = True
+                            execution_result.fill_price = signal.price
+                            executed_count += 1
                         
                         logger.info(
                             f"✅ Order executed for {signal.symbol}: {result.get('order_id', 'N/A')}"
