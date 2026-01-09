@@ -57,6 +57,7 @@ class TierExposureTracker:
         self._lock = threading.Lock()  # For sync operations
         self._async_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None  # For async operations
         self._reserved_exposures: Dict[str, float] = {}  # Track reserved exposure by tier
+        self._reserved_symbols: Dict[str, Set[str]] = {}  # Track which symbols have reserved exposure per tier (for debugging)
     
     def calculate_tier_exposure(
         self,
@@ -119,6 +120,9 @@ class TierExposureTracker:
     ) -> tuple[bool, str]:
         """
         Check if adding a position would exceed tier cap.
+        
+        DEPRECATED: Use reserve_exposure() for atomic operations.
+        This method is kept for backward compatibility.
         
         Args:
             tier: Tier name (TIER1, TIER2, TIER3)
@@ -220,6 +224,11 @@ class TierExposureTracker:
             # Reserve the exposure atomically
             self._reserved_exposures[tier] = reserved_for_tier + proposed_value
             
+            # Track reserved symbols for debugging (optional hardening)
+            if tier not in self._reserved_symbols:
+                self._reserved_symbols[tier] = set()
+            self._reserved_symbols[tier].add(symbol)
+            
             logger.info(
                 f"✅ {symbol} ({tier}): Exposure reserved atomically. "
                 f"Total reserved for {tier}: ${self._reserved_exposures[tier]:,.0f}"
@@ -230,14 +239,37 @@ class TierExposureTracker:
         """
         Release reserved exposure after execution (success or failure).
         
+        Includes safeguard against double-release for forensic debugging.
+        
         Args:
             tier: Tier name
             value: Dollar value to release
             symbol: Symbol for logging
         """
         with self._lock:
+            # Safeguard against double-release (optional hardening)
+            if tier not in self._reserved_symbols or symbol not in self._reserved_symbols[tier]:
+                logger.error(
+                    f"🚨 Double-release detected: {symbol} ({tier}) was not reserved",
+                    extra={
+                        "symbol": symbol,
+                        "tier": tier,
+                        "value": value,
+                        "reserved_symbols": list(self._reserved_symbols.get(tier, set())),
+                        "current_reserved": self._reserved_exposures.get(tier, 0.0)
+                    }
+                )
+                # Don't throw - allow release to continue for resilience
+                # This is just for forensic debugging
+            
             current_reserved = self._reserved_exposures.get(tier, 0.0)
-            self._reserved_exposures[tier] = max(0.0, current_reserved - value)
+            new_reserved = max(0.0, current_reserved - value)
+            self._reserved_exposures[tier] = new_reserved
+            
+            # Remove from reserved symbols tracking
+            if tier in self._reserved_symbols:
+                self._reserved_symbols[tier].discard(symbol)
+            
             logger.debug(
                 f"🔓 {symbol} ({tier}): Released ${value:,.0f}. "
                 f"Remaining reserved for {tier}: ${self._reserved_exposures[tier]:,.0f}"
@@ -308,6 +340,11 @@ class TierExposureTracker:
         # Reserve atomically
         self._reserved_exposures[tier] = reserved_for_tier + proposed_value
         
+        # Track reserved symbols for debugging (optional hardening)
+        if tier not in self._reserved_symbols:
+            self._reserved_symbols[tier] = set()
+        self._reserved_symbols[tier].add(symbol)
+        
         logger.info(
             f"✅ {symbol} ({tier}): Exposure reserved atomically. "
             f"Reserved: ${self._reserved_exposures[tier]:,.0f}"
@@ -324,8 +361,27 @@ class TierExposureTracker:
     
     def _release_exposure_internal(self, tier: str, value: float, symbol: str) -> None:
         """Internal method called within lock."""
+        # Safeguard against double-release (optional hardening)
+        if tier not in self._reserved_symbols or symbol not in self._reserved_symbols[tier]:
+            logger.error(
+                f"🚨 Double-release detected: {symbol} ({tier}) was not reserved",
+                extra={
+                    "symbol": symbol,
+                    "tier": tier,
+                    "value": value,
+                    "reserved_symbols": list(self._reserved_symbols.get(tier, set())),
+                    "current_reserved": self._reserved_exposures.get(tier, 0.0)
+                }
+            )
+        
         current_reserved = self._reserved_exposures.get(tier, 0.0)
-        self._reserved_exposures[tier] = max(0.0, current_reserved - value)
+        new_reserved = max(0.0, current_reserved - value)
+        self._reserved_exposures[tier] = new_reserved
+        
+        # Remove from reserved symbols tracking
+        if tier in self._reserved_symbols:
+            self._reserved_symbols[tier].discard(symbol)
+        
         logger.debug(f"🔓 {symbol} ({tier}): Released ${value:,.0f}")
     
     def get_tier_for_symbol(self, symbol: str) -> Optional[str]:

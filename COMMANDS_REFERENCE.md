@@ -1,5 +1,67 @@
 # Trading System Commands Reference
 
+## 🧪 Testing Commands (NEW - Critical Fixes)
+
+### Quick Test All Critical Fixes
+```bash
+python3 tests/test_critical_fixes.py
+```
+
+### Run All Tests via Script
+```bash
+./run_tests.sh              # Run all basic tests
+./run_tests.sh critical     # Test critical fixes only
+./run_tests.sh hybrid       # Test hybrid scaling
+./run_tests.sh config       # Test config validation
+```
+
+### Individual Critical Fix Tests
+```bash
+# Problem 1: Deterministic Pipeline
+python3 -c "from tests.test_critical_fixes import TestProblem1_DeterministicPipeline; TestProblem1_DeterministicPipeline().test_pipeline_enforces_order()"
+
+# Problem 2: Atomic Locking
+python3 -c "from tests.test_critical_fixes import TestProblem2_AtomicLocking; TestProblem2_AtomicLocking().test_reserve_release_cycle()"
+
+# Problem 3: Live Account Value
+python3 -c "from tests.test_critical_fixes import TestProblem3_LiveAccountValue; TestProblem3_LiveAccountValue().test_sizer_uses_live_equity()"
+
+# Problem 4: Tier Validation (requires invalid config)
+python3 -c "
+from config.settings import AppConfig
+import os
+os.environ['ENABLE_TIERED_ALLOCATION'] = 'true'
+os.environ['TIER1_ALLOCATION'] = '0.50'
+os.environ['TIER2_ALLOCATION'] = '0.30'
+os.environ['TIER3_ALLOCATION'] = '0.10'  # Invalid
+try:
+    AppConfig.from_env()
+    print('❌ Should have failed')
+except ValueError as e:
+    print('✅ Validation works:', str(e)[:50])
+"
+
+# Problem 5: Scanner Diversity
+python3 tests/test_critical_fixes.py  # Includes scanner test
+
+# Problem 6: Fractional Check
+python3 -c "from tests.test_critical_fixes import TestProblem6_FractionalCheck; TestProblem6_FractionalCheck().test_fractional_validation_exists()"
+
+# Problem 7: Structured Logging
+python3 -c "from tests.test_critical_fixes import TestProblem7_StructuredLogging; TestProblem7_StructuredLogging().test_validation_decision_has_metadata()"
+```
+
+### Full Test Suite (if pytest installed)
+```bash
+pytest tests/ -v                    # All tests
+pytest tests/test_critical_fixes.py -v  # Critical fixes only
+pytest tests/test_hybrid_scaling.py -v  # Hybrid scaling
+```
+
+---
+
+# Trading System Commands Reference
+
 Complete reference guide for all commands to run the trading system, backtests, and database queries.
 
 ---
