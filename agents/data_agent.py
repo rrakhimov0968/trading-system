@@ -98,6 +98,7 @@ class DataAgent(BaseAgent):
         Fetch market data for multiple symbols.
         
         This is the main entry point for the agent.
+        Uses batch fetching for Alpaca provider (1 API call for all symbols).
         
         Args:
             symbols: List of stock symbols
@@ -120,6 +121,11 @@ class DataAgent(BaseAgent):
             provider=self.provider.value
         )
         
+        # For Alpaca, use batch fetching (1 API call for all symbols)
+        if self.provider == DataProvider.ALPACA and len(symbols) > 1:
+            return self._fetch_alpaca_batch(symbols, timeframe, start_date, end_date, limit)
+        
+        # For other providers or single symbol, use sequential fetching
         results = {}
         for symbol in symbols:
             try:
@@ -428,6 +434,244 @@ class DataAgent(BaseAgent):
             self.log_exception(f"Unexpected error fetching Alpaca data for {symbol}", e)
             raise AgentError(
                 f"Failed to fetch Alpaca data: {str(e)}",
+                correlation_id=self._correlation_id
+            ) from e
+    
+    @retry_with_backoff(config=RetryConfig(max_attempts=3, initial_delay=1.0))
+    def _fetch_alpaca_batch(
+        self,
+        symbols: List[str],
+        timeframe: str,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+        limit: int
+    ) -> Dict[str, MarketData]:
+        """
+        Fetch data for multiple symbols in a single batch API call.
+        
+        This is much more efficient than sequential fetching:
+        - 29 symbols = 1 API call (vs 29 calls)
+        - Faster execution (parallel processing on server side)
+        - Better rate limit utilization
+        
+        Args:
+            symbols: List of stock symbols to fetch
+            timeframe: Bar timeframe
+            start_date: Start date
+            end_date: End date
+            limit: Maximum bars per symbol
+            
+        Returns:
+            Dictionary mapping symbol to MarketData
+        """
+        # Acquire rate limiter (only need 1 token for batch request)
+        if not self.rate_limiter.acquire(blocking=True, timeout=60.0):
+            raise AgentError(
+                f"Rate limiter timeout for batch request - too many requests",
+                correlation_id=self._correlation_id
+            )
+        
+        try:
+            # Validate all symbols
+            validated_symbols = [validate_symbol(s) for s in symbols]
+            
+            # Check cache for all symbols first
+            results = {}
+            symbols_to_fetch = []
+            
+            for symbol in validated_symbols:
+                cache_key = f"{symbol}_{timeframe}_{limit}"
+                cached_data = self._get_from_cache(cache_key)
+                if cached_data:
+                    self.log_debug(f"Using cached data for {symbol}")
+                    results[symbol] = cached_data
+                else:
+                    symbols_to_fetch.append(symbol)
+            
+            # If all symbols are cached, return early
+            if not symbols_to_fetch:
+                self.log_info(f"All {len(symbols)} symbols retrieved from cache")
+                return results
+            
+            # Map timeframe string to Alpaca TimeFrame
+            tf_mapping = {
+                "1Min": TimeFrame.Minute,
+                "5Min": TimeFrame(5, TimeFrame.Minute),
+                "15Min": TimeFrame(15, TimeFrame.Minute),
+                "1Hour": TimeFrame.Hour,
+                "1Day": TimeFrame.Day,
+            }
+            
+            alpaca_tf = tf_mapping.get(timeframe, TimeFrame.Day)
+            
+            # Set default dates if not provided
+            import pytz
+            if not end_date:
+                end_date = datetime.now(pytz.UTC)
+            elif end_date.tzinfo is None:
+                end_date = pytz.UTC.localize(end_date)
+            
+            if not start_date:
+                start_date = end_date - timedelta(days=365)
+            elif start_date.tzinfo is None:
+                start_date = pytz.UTC.localize(start_date)
+            
+            # Batch request: pass all symbols at once
+            self.log_info(
+                f"Batch fetching {len(symbols_to_fetch)} symbols from Alpaca "
+                f"(1 API call instead of {len(symbols_to_fetch)})"
+            )
+            
+            request_params = StockBarsRequest(
+                symbol_or_symbols=symbols_to_fetch,  # Multiple symbols in one request
+                timeframe=alpaca_tf,
+                start=start_date,
+                end=end_date,
+                limit=limit
+            )
+            
+            bars_response = self.alpaca_client.get_stock_bars(request_params)
+            
+            if bars_response is None:
+                self.log_warning(f"Alpaca batch request returned None")
+                # Fallback to individual fetches for remaining symbols
+                for symbol in symbols_to_fetch:
+                    try:
+                        results[symbol] = self._fetch_alpaca_data(
+                            symbol, timeframe, start_date, end_date, limit, strict_validation=False
+                        )
+                    except Exception as e:
+                        self.log_warning(f"Failed to fetch {symbol} in fallback: {e}")
+                return results
+            
+            # Parse batch response (same structure as single symbol, but dict keyed by symbol)
+            # Helper function to extract bar data (reuse from _fetch_alpaca_data)
+            def extract_bar_data(bar_item):
+                if hasattr(bar_item, 'timestamp'):
+                    return {
+                        'timestamp': bar_item.timestamp,
+                        'open': float(bar_item.open),
+                        'high': float(bar_item.high),
+                        'low': float(bar_item.low),
+                        'close': float(bar_item.close),
+                        'volume': int(bar_item.volume)
+                    }
+                elif isinstance(bar_item, dict):
+                    return {
+                        'timestamp': bar_item.get('timestamp') or bar_item.get('t'),
+                        'open': float(bar_item.get('open') or bar_item.get('o', 0)),
+                        'high': float(bar_item.get('high') or bar_item.get('h', 0)),
+                        'low': float(bar_item.get('low') or bar_item.get('l', 0)),
+                        'close': float(bar_item.get('close') or bar_item.get('c', 0)),
+                        'volume': int(bar_item.get('volume') or bar_item.get('v', 0))
+                    }
+                elif isinstance(bar_item, tuple) and len(bar_item) >= 6:
+                    return {
+                        'timestamp': bar_item[0],
+                        'open': float(bar_item[1]),
+                        'high': float(bar_item[2]),
+                        'low': float(bar_item[3]),
+                        'close': float(bar_item[4]),
+                        'volume': int(bar_item[5])
+                    }
+                else:
+                    raise ValueError(f"Unsupported bar format: {type(bar_item)}")
+            
+            # Extract response data (handle different formats)
+            response_data = None
+            
+            if isinstance(bars_response, tuple) and len(bars_response) >= 2:
+                response_data = bars_response[1]
+            elif isinstance(bars_response, dict):
+                response_data = bars_response
+            elif hasattr(bars_response, 'data'):
+                data_attr = bars_response.data
+                if isinstance(data_attr, dict):
+                    response_data = data_attr
+                elif isinstance(data_attr, tuple) and len(data_attr) >= 2:
+                    response_data = data_attr[1]
+            
+            # Parse bars for each symbol
+            if response_data and isinstance(response_data, dict):
+                for symbol in symbols_to_fetch:
+                    try:
+                        if symbol not in response_data:
+                            self.log_warning(f"Symbol {symbol} not in batch response, keys: {list(response_data.keys())}")
+                            continue
+                        
+                        bar_list = response_data[symbol]
+                        if not bar_list:
+                            self.log_warning(f"No bars returned for {symbol} in batch response")
+                            continue
+                        
+                        bars = []
+                        for bar_item in bar_list:
+                            try:
+                                bar_data = extract_bar_data(bar_item)
+                                bars.append(Bar(
+                                    timestamp=bar_data['timestamp'],
+                                    open=bar_data['open'],
+                                    high=bar_data['high'],
+                                    low=bar_data['low'],
+                                    close=bar_data['close'],
+                                    volume=bar_data['volume'],
+                                    symbol=symbol,
+                                    timeframe=timeframe
+                                ))
+                            except Exception as e:
+                                self.log_warning(f"Failed to parse bar for {symbol}: {e}")
+                                continue
+                        
+                        if bars:
+                            market_data = MarketData(symbol=symbol, bars=bars)
+                            # Cache the result
+                            cache_key = f"{symbol}_{timeframe}_{limit}"
+                            self._cache_data(cache_key, market_data)
+                            results[symbol] = market_data
+                            self.log_info(f"Fetched {len(bars)} bars for {symbol} from batch request")
+                        else:
+                            self.log_warning(f"No valid bars parsed for {symbol}")
+                    except Exception as e:
+                        self.log_exception(f"Error processing {symbol} from batch response", e)
+                        continue
+            else:
+                self.log_warning(
+                    f"Unexpected batch response format: {type(bars_response)}, "
+                    f"falling back to individual fetches"
+                )
+                # Fallback to individual fetches
+                for symbol in symbols_to_fetch:
+                    try:
+                        results[symbol] = self._fetch_alpaca_data(
+                            symbol, timeframe, start_date, end_date, limit, strict_validation=False
+                        )
+                    except Exception as e:
+                        self.log_warning(f"Failed to fetch {symbol} in fallback: {e}")
+            
+            self.log_info(
+                f"Batch fetch completed: {len(results)}/{len(symbols)} symbols retrieved "
+                f"({len(symbols_to_fetch)} from API, {len(symbols) - len(symbols_to_fetch)} from cache)"
+            )
+            
+            return results
+            
+        except AlpacaAPIError as e:
+            self.log_exception(f"Alpaca API error in batch fetch", e)
+            # Fallback to individual fetches
+            self.log_info("Falling back to individual symbol fetches")
+            results = {}
+            for symbol in symbols:
+                try:
+                    results[symbol] = self._fetch_alpaca_data(
+                        symbol, timeframe, start_date, end_date, limit, strict_validation=False
+                    )
+                except Exception as e:
+                    self.log_warning(f"Failed to fetch {symbol}: {e}")
+            return results
+        except Exception as e:
+            self.log_exception(f"Unexpected error in batch fetch", e)
+            raise AgentError(
+                f"Failed to batch fetch Alpaca data: {str(e)}",
                 correlation_id=self._correlation_id
             ) from e
     

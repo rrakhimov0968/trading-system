@@ -1,0 +1,39 @@
+# Hybrid Stock Selection - 29 Symbols
+
+## Tier 1: Index ETFs (40% of capital, 4 symbols)
+SPY
+QQQ
+DIA
+IWM
+
+## Tier 2: Sector ETFs (30% of capital, 5 symbols)
+XLK
+XLF
+XLV
+XLE
+XLY
+
+## Tier 3: Individual Stocks (30% of capital, 20 symbols)
+AAPL
+MSFT
+GOOGL
+AMZN
+NVDA
+META
+TSLA
+UNH
+JPM
+V
+MA
+LLY
+WMT
+HD
+PG
+XOM
+CVX
+JNJ
+BAC
+COST
+
+## Total: 29 symbols
+## Allocation: 40% Tier 1, 30% Tier 2, 30% Tier 3
