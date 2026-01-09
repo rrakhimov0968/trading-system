@@ -231,6 +231,11 @@ class AppConfig:
     max_gap_pct: float = 0.02  # Maximum price gap allowed (2%)
     max_signal_age_hours: float = 24  # Maximum signal age in hours
     baseline_symbols: List[str] = None  # Always monitor these symbols (SPY, QQQ)
+    # Regime filtering settings
+    enable_regime_filter: bool = False  # Enable market regime filtering
+    strict_regime: bool = False  # If True, block all trades in bear markets. If False, scale positions (soft mode, default).
+    regime_benchmark: str = "SPY"  # Benchmark for regime check (SPY, QQQ, etc.)
+    regime_sma_period: int = 200  # SMA period for regime check
     
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -289,7 +294,12 @@ class AppConfig:
             scanner_file=os.getenv("SCANNER_FILE", "candidates.json"),
             max_gap_pct=float(os.getenv("MAX_GAP_PCT", "0.02")),
             max_signal_age_hours=float(os.getenv("MAX_SIGNAL_AGE_HOURS", "24")),
-            baseline_symbols=[s.strip() for s in os.getenv("BASELINE_SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
+            baseline_symbols=[s.strip() for s in os.getenv("BASELINE_SYMBOLS", "SPY,QQQ").split(",") if s.strip()],
+            # Regime filtering
+            enable_regime_filter=os.getenv("ENABLE_REGIME_FILTER", "false").lower() == "true",
+            strict_regime=os.getenv("STRICT_REGIME", "true").lower() == "true",
+            regime_benchmark=os.getenv("REGIME_BENCHMARK", "SPY"),
+            regime_sma_period=int(os.getenv("REGIME_SMA_PERIOD", "200"))
         )
         
         # CRITICAL: Validate tier allocations sum to 1.0 (Problem 4 Fix)

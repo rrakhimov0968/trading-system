@@ -27,6 +27,8 @@ from core.orchestrator_integration import (
     load_focus_symbols,
     load_symbol_tier_mapping
 )
+from agents.market_regime_agent import MarketRegimeAgent
+from core.market_regime import MarketRegime
 from pathlib import Path
 import json
 
@@ -128,6 +130,16 @@ class TradingSystemOrchestrator:
             
             # Store symbol tier mapping for quick lookup
             self.symbol_tier_mapping = load_symbol_tier_mapping(config)
+            
+            # Initialize market regime agent (if enabled)
+            self.market_regime_agent = None
+            if config.enable_regime_filter:
+                self.market_regime_agent = MarketRegimeAgent(
+                    config=config,
+                    data_agent=self.data_agent
+                )
+                mode_str = "strict (hard gate)" if config.strict_regime else "soft (scalar)"
+                logger.info(f"✅ Market regime agent initialized: {config.regime_benchmark} > SMA{config.regime_sma_period} ({mode_str} mode)")
             
             logger.info("All agents and PositionManager initialized successfully")
         except Exception as e:
@@ -469,25 +481,58 @@ class TradingSystemOrchestrator:
             # Cleanup old signals to prevent memory buildup
             self._cleanup_old_signals()
             
+            # MARKET REGIME CHECK (system-level protection) - BEFORE signal generation
+            current_regime: Optional[MarketRegime] = None
+            if self.market_regime_agent:
+                try:
+                    current_regime = self.market_regime_agent.process(market_data)
+                    logger.info(
+                        "Market regime evaluated",
+                        extra={
+                            "allowed": current_regime.allowed,
+                            "risk_scalar": current_regime.risk_scalar,
+                            "reason": current_regime.reason
+                        }
+                    )
+                    
+                    if not current_regime.allowed:
+                        logger.warning(f"🚫 MARKET REGIME: {current_regime.reason}")
+                        logger.warning("Trading halted due to market regime (strict mode enabled)")
+                        signals = []
+                        logger.info("Step 2: Skipped signal generation (regime agent blocked trading)")
+                    else:
+                        logger.info(f"✅ MARKET REGIME: {current_regime.reason}")
+                        # Continue with normal flow - regime_scalar will be applied during position sizing
+                except Exception as e:
+                    logger.error(f"Market regime evaluation failed: {e}", exc_info=True)
+                    logger.warning("Allowing trading despite regime evaluation error")
+                    current_regime = MarketRegime(allowed=True, risk_scalar=1.0, reason="Evaluation_error")
+            else:
+                current_regime = MarketRegime(allowed=True, risk_scalar=1.0, reason="Regime_filter_disabled")
+            
             # Step 2: Strategy Agent evaluates data and generates signals
-            logger.info("Step 2: Evaluating market data and generating signals...")
-            try:
-                signals = self.strategy_agent.process(market_data)
-                # Record LLM success (StrategyAgent uses LLM)
-                self.circuit_breaker.record_llm_success()
-                self.monitoring_metrics["llm_success_count"] += 1
-            except Exception as e:
-                logger.error(f"StrategyAgent failed: {e}", exc_info=True)
-                logger.warning("Continuing iteration with empty signals due to StrategyAgent failure")
-                signals = []
-                # Record LLM failure
-                self.circuit_breaker.record_llm_failure()
-                self.monitoring_metrics["llm_failure_count"] += 1
-                
-                # Check circuit breaker after LLM failure
-                if self.circuit_breaker.is_open():
-                    logger.error("Circuit breaker opened due to LLM failures - stopping iteration")
-                    return
+            if current_regime and not current_regime.allowed:
+                # Already set signals = [] above, skip to end of iteration
+                pass
+            else:
+                logger.info("Step 2: Evaluating market data and generating signals...")
+                try:
+                    signals = self.strategy_agent.process(market_data)
+                    # Record LLM success (StrategyAgent uses LLM)
+                    self.circuit_breaker.record_llm_success()
+                    self.monitoring_metrics["llm_success_count"] += 1
+                except Exception as e:
+                    logger.error(f"StrategyAgent failed: {e}", exc_info=True)
+                    logger.warning("Continuing iteration with empty signals due to StrategyAgent failure")
+                    signals = []
+                    # Record LLM failure
+                    self.circuit_breaker.record_llm_failure()
+                    self.monitoring_metrics["llm_failure_count"] += 1
+                    
+                    # Check circuit breaker after LLM failure
+                    if self.circuit_breaker.is_open():
+                        logger.error("Circuit breaker opened due to LLM failures - stopping iteration")
+                        return
             
             if signals:
                 logger.info(f"Generated {len(signals)} trading signals")
@@ -716,11 +761,14 @@ class TradingSystemOrchestrator:
                                     current_price = signal.price
                                     if current_price:
                                         # ALWAYS pass live account_value (Problem 3 Fix)
+                                        # Apply market regime scalar to position sizing
+                                        regime_scalar = current_regime.risk_scalar if current_regime else 1.0
                                         shares, meta = self.tiered_sizer.calculate_shares(
                                             signal.symbol,
                                             current_price,
                                             tier,
-                                            account_value=account_value  # Live equity, not cached
+                                            account_value=account_value,  # Live equity, not cached
+                                            regime_scalar=regime_scalar  # Market regime risk scalar
                                         )
                                         
                                         if shares and shares > 0:

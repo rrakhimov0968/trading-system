@@ -30,6 +30,8 @@ from core.orchestrator_integration import (
     load_focus_symbols,
     load_symbol_tier_mapping
 )
+from agents.market_regime_agent import MarketRegimeAgent
+from core.market_regime import MarketRegime
 from pathlib import Path
 import os
 
@@ -135,6 +137,16 @@ class AsyncTradingSystemOrchestrator:
             
             # Store symbol tier mapping for quick lookup
             self.symbol_tier_mapping = load_symbol_tier_mapping(config)
+            
+            # Initialize market regime agent (if enabled)
+            self.market_regime_agent = None
+            if config.enable_regime_filter:
+                self.market_regime_agent = MarketRegimeAgent(
+                    config=config,
+                    data_agent=self.data_agent
+                )
+                mode_str = "strict (hard gate)" if config.strict_regime else "soft (scalar)"
+                logger.info(f"✅ Market regime agent initialized: {config.regime_benchmark} > SMA{config.regime_sma_period} ({mode_str} mode)")
             
             logger.info("All agents and PositionManager initialized successfully")
         except Exception as e:
@@ -324,9 +336,42 @@ class AsyncTradingSystemOrchestrator:
             logger.error(f"Error reconciling positions: {e}", exc_info=True)
     
     async def _handle_data_ready(self, market_data: Dict[str, MarketData]) -> None:
-        """Handle data_ready event - trigger StrategyAgent."""
+        """Handle data_ready event - trigger StrategyAgent (after regime check)."""
         try:
             logger.info(f"Processing market data for {len(market_data)} symbols")
+            
+            # MARKET REGIME CHECK (system-level protection)
+            current_regime: Optional[MarketRegime] = None
+            if self.market_regime_agent and market_data:
+                try:
+                    current_regime = self.market_regime_agent.process(market_data)
+                    logger.info(
+                        "Market regime evaluated",
+                        extra={
+                            "allowed": current_regime.allowed,
+                            "risk_scalar": current_regime.risk_scalar,
+                            "reason": current_regime.reason
+                        }
+                    )
+                    
+                    if not current_regime.allowed:
+                        logger.warning(f"🚫 MARKET REGIME: {current_regime.reason}")
+                        logger.warning("Trading halted due to market regime (strict mode enabled)")
+                        # Skip signal generation
+                        await self.event_bus.publish('signals_ready', [])
+                        return
+                    else:
+                        logger.info(f"✅ MARKET REGIME: {current_regime.reason}")
+                except Exception as e:
+                    logger.error(f"Market regime evaluation failed: {e}", exc_info=True)
+                    logger.warning("Allowing trading despite regime evaluation error")
+                    current_regime = MarketRegime(allowed=True, risk_scalar=1.0, reason="Evaluation_error")
+            else:
+                current_regime = MarketRegime(allowed=True, risk_scalar=1.0, reason="Regime_filter_disabled")
+            
+            # Store regime for use in position sizing
+            self._current_regime = current_regime
+            
             signals = await self._async_process(self.strategy_agent.process, market_data)
             self._current_iteration_data['signals'] = signals
             await self.event_bus.publish('signals_ready', signals)
@@ -578,11 +623,14 @@ class AsyncTradingSystemOrchestrator:
                                 
                                 if current_price:
                                     # ALWAYS pass live account_value (Problem 3 Fix)
+                                    # Apply market regime scalar to position sizing
+                                    regime_scalar = self._current_regime.risk_scalar if hasattr(self, '_current_regime') and self._current_regime else 1.0
                                     shares, meta = self.tiered_sizer.calculate_shares(
                                         signal.symbol,
                                         current_price,
                                         tier,
-                                        account_value=account_value  # Live equity, not cached
+                                        account_value=account_value,  # Live equity, not cached
+                                        regime_scalar=regime_scalar  # Market regime risk scalar
                                     )
                                     
                                     if shares and shares > 0:

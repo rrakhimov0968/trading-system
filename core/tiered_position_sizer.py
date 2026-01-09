@@ -121,7 +121,8 @@ class TieredPositionSizer:
         symbol: str,
         current_price: float,
         tier: str,
-        account_value: float  # REQUIRED: Always pass live equity (Problem 3 Fix)
+        account_value: float,  # REQUIRED: Always pass live equity (Problem 3 Fix)
+        regime_scalar: float = 1.0  # Market regime risk scalar (0.0-1.25)
     ) -> Tuple[Optional[float], Dict[str, any]]:
         """
         Calculate position size for a symbol based on tier.
@@ -180,6 +181,9 @@ class TieredPositionSizer:
         # SAFETY FIX 3: Enforce tier cap (max position % within tier)
         max_position_value_in_tier = account_value * config.max_position_pct
         position_value = min(base_position_value, max_position_value_in_tier)
+        
+        # REGIME SCALING: Apply market regime risk scalar
+        position_value = position_value * regime_scalar
         
         # Calculate shares
         if self.use_fractional:
@@ -247,6 +251,7 @@ class TieredPositionSizer:
         metadata = {
             'tier': tier,
             'tier_allocation': config.allocation,
+            'regime_scalar': regime_scalar,
             'tier_capital': tier_capital,
             'base_position_value': base_position_value,
             'position_value': position_value,
