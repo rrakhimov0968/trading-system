@@ -662,16 +662,24 @@ class TradingSystemOrchestrator:
                             if tier:
                                 # Estimate proposed position value
                                 proposed_value = (signal.qty or 0) * (signal.price or 0)
-                                approved_tier, tier_reason = self.tier_tracker.check_tier_capacity(
-                                    tier,
-                                    proposed_value,
-                                    tier_exposures[tier],
-                                    account_value
+                                # ATOMIC: Reserve exposure (Problem 2 Fix)
+                                approved_tier, tier_reason = self.tier_tracker.reserve_exposure(
+                                    tier=tier,
+                                    proposed_value=proposed_value,
+                                    current_tier_exposure=tier_exposures[tier],
+                                    account_value=account_value,
+                                    symbol=signal.symbol
                                 )
                                 
                                 if not approved_tier:
                                     logger.warning(
-                                        f"🚫 SKIPPING BUY order for {signal.symbol}: Tier exposure check failed - {tier_reason}"
+                                        f"🚫 SKIPPING BUY order for {signal.symbol}: Tier exposure check failed - {tier_reason}",
+                                        extra={
+                                            "symbol": signal.symbol,
+                                            "reason": "tier_exposure",
+                                            "tier": tier,
+                                            "tier_reason": tier_reason
+                                        }
                                     )
                                     execution_result.executed = False
                                     execution_result.error = f"Tier exposure: {tier_reason}"
@@ -707,10 +715,12 @@ class TradingSystemOrchestrator:
                                 try:
                                     current_price = signal.price
                                     if current_price:
+                                        # ALWAYS pass live account_value (Problem 3 Fix)
                                         shares, meta = self.tiered_sizer.calculate_shares(
                                             signal.symbol,
                                             current_price,
-                                            tier
+                                            tier,
+                                            account_value=account_value  # Live equity, not cached
                                         )
                                         
                                         if shares and shares > 0:
@@ -722,8 +732,17 @@ class TradingSystemOrchestrator:
                                             )
                                         else:
                                             logger.warning(
-                                                f"🚫 SKIPPING BUY order for {signal.symbol}: Position sizing failed - {meta.get('reason', 'Unknown')}"
+                                                f"🚫 SKIPPING BUY order for {signal.symbol}: Position sizing failed - {meta.get('reason', 'Unknown')}",
+                                                extra={
+                                                    "symbol": signal.symbol,
+                                                    "reason": "position_sizing",
+                                                    "tier": tier,
+                                                    "sizing_reason": meta.get('reason')
+                                                }
                                             )
+                                            # Release reserved exposure on failure (Problem 2 Fix)
+                                            if self.tier_tracker:
+                                                self.tier_tracker.release_exposure(tier, proposed_value, signal.symbol)
                                             execution_result.executed = False
                                             execution_result.error = f"Position sizing: {meta.get('reason', 'Failed')}"
                                             execution_results.append(execution_result)
@@ -832,8 +851,22 @@ class TradingSystemOrchestrator:
                         execution_result.error = str(e)
                         logger.error(
                             f"ExecutionAgent failed for {signal.symbol}: {e}",
-                            exc_info=True
+                            exc_info=True,
+                            extra={
+                                "symbol": signal.symbol,
+                                "reason": "execution_error",
+                                "error": str(e),
+                                "action": signal.action.value
+                            }
                         )
+                        # Release reserved exposure on execution failure (Problem 2 Fix)
+                        if signal.action == SignalAction.BUY and self.tier_tracker:
+                            tier_for_release = self.tier_tracker.get_tier_for_symbol(signal.symbol)
+                            if tier_for_release:
+                                proposed_value = (signal.qty or 0) * (signal.price or 0)
+                                if proposed_value > 0:
+                                    self.tier_tracker.release_exposure(tier_for_release, proposed_value, signal.symbol)
+                                    logger.info(f"🔓 Released reserved exposure for {signal.symbol} after execution failure")
                         # Continue with next trade
                     
                     execution_results.append(execution_result)

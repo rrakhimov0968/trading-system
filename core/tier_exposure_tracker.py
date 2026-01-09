@@ -4,10 +4,12 @@ Tier Exposure Tracker - Prevents tier allocation drift over time.
 Critical protection against portfolio drift where winning positions
 cause tier exposure to exceed configured caps.
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+import threading
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,11 @@ class TierExposureTracker:
         """
         self.symbol_tier_mapping = symbol_tier_mapping
         self.last_check = None
+        
+        # Atomic locking for race condition prevention (Problem 2 Fix)
+        self._lock = threading.Lock()  # For sync operations
+        self._async_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None  # For async operations
+        self._reserved_exposures: Dict[str, float] = {}  # Track reserved exposure by tier
     
     def calculate_tier_exposure(
         self,
@@ -158,6 +165,168 @@ class TierExposureTracker:
         )
         
         return True, "Approved"
+    
+    def reserve_exposure(
+        self,
+        tier: str,
+        proposed_value: float,
+        current_tier_exposure: TierExposure,
+        account_value: float,
+        symbol: str
+    ) -> tuple[bool, str]:
+        """
+        ATOMIC: Reserve tier exposure before execution (Problem 2 Fix).
+        
+        This prevents race conditions where multiple signals pass checks
+        before either order executes, causing tier cap violations.
+        
+        Args:
+            tier: Tier name
+            proposed_value: Dollar value of proposed position
+            current_tier_exposure: Current TierExposure for this tier
+            account_value: Current account equity
+            symbol: Symbol for tracking
+        
+        Returns:
+            (approved: bool, reason: str)
+        """
+        with self._lock:
+            # Check capacity including already reserved exposure
+            reserved_for_tier = self._reserved_exposures.get(tier, 0.0)
+            
+            cap = self.TIER_CAPS.get(tier)
+            if not cap:
+                return False, f"Unknown tier: {tier}"
+            
+            current_pct = current_tier_exposure.current_pct
+            proposed_pct = (proposed_value / account_value) if account_value > 0 else 0
+            reserved_pct = (reserved_for_tier / account_value) if account_value > 0 else 0
+            new_total_pct = current_pct + reserved_pct + proposed_pct
+            
+            max_allowed = cap + self.SAFETY_BUFFER
+            
+            if new_total_pct > max_allowed:
+                reason = (
+                    f"Tier {tier} capacity exceeded (atomic check): "
+                    f"Current={current_pct:.1%}, "
+                    f"Reserved={reserved_pct:.1%}, "
+                    f"Proposed={proposed_pct:.1%}, "
+                    f"Total={new_total_pct:.1%}, "
+                    f"Cap={cap:.1%} (+{self.SAFETY_BUFFER:.1%} buffer)"
+                )
+                logger.warning(f"🚫 {symbol}: {reason}")
+                return False, reason
+            
+            # Reserve the exposure atomically
+            self._reserved_exposures[tier] = reserved_for_tier + proposed_value
+            
+            logger.info(
+                f"✅ {symbol} ({tier}): Exposure reserved atomically. "
+                f"Total reserved for {tier}: ${self._reserved_exposures[tier]:,.0f}"
+            )
+            return True, "Reserved"
+    
+    def release_exposure(self, tier: str, value: float, symbol: str) -> None:
+        """
+        Release reserved exposure after execution (success or failure).
+        
+        Args:
+            tier: Tier name
+            value: Dollar value to release
+            symbol: Symbol for logging
+        """
+        with self._lock:
+            current_reserved = self._reserved_exposures.get(tier, 0.0)
+            self._reserved_exposures[tier] = max(0.0, current_reserved - value)
+            logger.debug(
+                f"🔓 {symbol} ({tier}): Released ${value:,.0f}. "
+                f"Remaining reserved for {tier}: ${self._reserved_exposures[tier]:,.0f}"
+            )
+    
+    async def reserve_exposure_async(
+        self,
+        tier: str,
+        proposed_value: float,
+        current_tier_exposure: TierExposure,
+        account_value: float,
+        symbol: str
+    ) -> tuple[bool, str]:
+        """
+        Async version of reserve_exposure for async orchestrator.
+        
+        Args:
+            tier: Tier name
+            proposed_value: Dollar value of proposed position
+            current_tier_exposure: Current TierExposure for this tier
+            account_value: Current account equity
+            symbol: Symbol for tracking
+        
+        Returns:
+            (approved: bool, reason: str)
+        """
+        if self._async_lock:
+            async with self._async_lock:
+                return self._reserve_exposure_internal(tier, proposed_value, current_tier_exposure, account_value, symbol)
+        else:
+            # Fallback to sync lock if async lock not available
+            return self.reserve_exposure(tier, proposed_value, current_tier_exposure, account_value, symbol)
+    
+    def _reserve_exposure_internal(
+        self,
+        tier: str,
+        proposed_value: float,
+        current_tier_exposure: TierExposure,
+        account_value: float,
+        symbol: str
+    ) -> tuple[bool, str]:
+        """Internal method called within lock."""
+        reserved_for_tier = self._reserved_exposures.get(tier, 0.0)
+        
+        cap = self.TIER_CAPS.get(tier)
+        if not cap:
+            return False, f"Unknown tier: {tier}"
+        
+        current_pct = current_tier_exposure.current_pct
+        proposed_pct = (proposed_value / account_value) if account_value > 0 else 0
+        reserved_pct = (reserved_for_tier / account_value) if account_value > 0 else 0
+        new_total_pct = current_pct + reserved_pct + proposed_pct
+        
+        max_allowed = cap + self.SAFETY_BUFFER
+        
+        if new_total_pct > max_allowed:
+            reason = (
+                f"Tier {tier} capacity exceeded (atomic check): "
+                f"Current={current_pct:.1%}, "
+                f"Reserved={reserved_pct:.1%}, "
+                f"Proposed={proposed_pct:.1%}, "
+                f"Total={new_total_pct:.1%}, "
+                f"Cap={cap:.1%}"
+            )
+            logger.warning(f"🚫 {symbol}: {reason}")
+            return False, reason
+        
+        # Reserve atomically
+        self._reserved_exposures[tier] = reserved_for_tier + proposed_value
+        
+        logger.info(
+            f"✅ {symbol} ({tier}): Exposure reserved atomically. "
+            f"Reserved: ${self._reserved_exposures[tier]:,.0f}"
+        )
+        return True, "Reserved"
+    
+    async def release_exposure_async(self, tier: str, value: float, symbol: str) -> None:
+        """Async version of release_exposure."""
+        if self._async_lock:
+            async with self._async_lock:
+                self._release_exposure_internal(tier, value, symbol)
+        else:
+            self.release_exposure(tier, value, symbol)
+    
+    def _release_exposure_internal(self, tier: str, value: float, symbol: str) -> None:
+        """Internal method called within lock."""
+        current_reserved = self._reserved_exposures.get(tier, 0.0)
+        self._reserved_exposures[tier] = max(0.0, current_reserved - value)
+        logger.debug(f"🔓 {symbol} ({tier}): Released ${value:,.0f}")
     
     def get_tier_for_symbol(self, symbol: str) -> Optional[str]:
         """Get tier assignment for a symbol"""

@@ -74,7 +74,7 @@ class TieredPositionSizer:
     
     def __init__(
         self,
-        account_value: float,
+        account_value: Optional[float] = None,  # Optional - can be passed per call
         tier_configs: Optional[Dict[str, TierConfig]] = None,
         use_fractional: bool = True,
         min_notional: float = 10.0,
@@ -84,13 +84,16 @@ class TieredPositionSizer:
         Initialize tiered position sizer.
         
         Args:
-            account_value: Total account value
+            account_value: Optional initial account value (deprecated - pass per call instead)
+                          Kept for backward compatibility but not used internally
             tier_configs: Optional custom tier configs (defaults to DEFAULT_TIER_CONFIGS)
             use_fractional: Enable fractional shares (required for < $25k accounts)
             min_notional: Minimum order notional in dollars ($10-25 recommended)
             enable_compression: Enable dynamic tier compression for expensive stocks
         """
-        self.account_value = account_value
+        # NOTE: account_value is stored for backward compatibility but NOT used
+        # Always pass account_value to calculate_shares() for live equity
+        self._initial_account_value = account_value
         self.use_fractional = use_fractional
         self.min_notional = min_notional
         self.enable_compression = enable_compression
@@ -117,7 +120,8 @@ class TieredPositionSizer:
         self,
         symbol: str,
         current_price: float,
-        tier: str
+        tier: str,
+        account_value: float  # REQUIRED: Always pass live equity (Problem 3 Fix)
     ) -> Tuple[Optional[float], Dict[str, any]]:
         """
         Calculate position size for a symbol based on tier.
@@ -128,17 +132,25 @@ class TieredPositionSizer:
         3. Enforce tier cap after sizing
         4. Enforce minimum notional for fractional shares
         5. Handle zero-share trap (expensive stocks)
+        6. ALWAYS use live account_value (never cached) - Problem 3 Fix
         
         Args:
             symbol: Stock symbol
             current_price: Current price per share
             tier: Tier name ('TIER1', 'TIER2', or 'TIER3')
+            account_value: REQUIRED - Current live account equity (NOT cached)
         
         Returns:
             Tuple of (shares: Optional[float], metadata: Dict)
             - shares: Number of shares (float if fractional, int if whole)
             - metadata: Dict with sizing details and warnings
         """
+        if account_value <= 0:
+            return None, {
+                'skipped': True,
+                'reason': f'Invalid account value: {account_value}',
+                'error': 'Account value must be > 0'
+            }
         if tier not in self.tier_configs:
             logger.error(f"Unknown tier: {tier}. Valid tiers: {list(self.tier_configs.keys())}")
             return None, {'error': f'Unknown tier: {tier}', 'skipped': True}
@@ -146,7 +158,8 @@ class TieredPositionSizer:
         config = self.tier_configs[tier]
         
         # SAFETY FIX 1: Never mutate config.allocation - compute effective allocation
-        tier_capital = self.account_value * config.allocation
+        # SAFETY FIX 6: Always use live account_value, never cached
+        tier_capital = account_value * config.allocation
         
         # SAFETY FIX 2: Dynamic tier compression for Tier 3 expensive stocks
         active_symbols = config.symbol_count
@@ -165,7 +178,7 @@ class TieredPositionSizer:
         base_position_value = tier_capital / active_symbols
         
         # SAFETY FIX 3: Enforce tier cap (max position % within tier)
-        max_position_value_in_tier = self.account_value * config.max_position_pct
+        max_position_value_in_tier = account_value * config.max_position_pct
         position_value = min(base_position_value, max_position_value_in_tier)
         
         # Calculate shares

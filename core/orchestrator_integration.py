@@ -68,6 +68,8 @@ def load_focus_symbols(config: AppConfig, scanner_file: Optional[Path] = None) -
     """
     Load symbols to monitor (scanner-driven or all configured symbols).
     
+    Includes forced diversity to prevent scanner bias (Problem 5 Fix).
+    
     Args:
         config: Application configuration
         scanner_file: Optional path to scanner output file
@@ -89,14 +91,29 @@ def load_focus_symbols(config: AppConfig, scanner_file: Optional[Path] = None) -
                 # Get scanner-selected symbols
                 scanner_symbols = scanner_data.get('symbols', [])[:10]  # Top 10
                 
-                # Always include baseline
-                focus_symbols = list(set(scanner_symbols + baseline_symbols))
+                # PROBLEM 5 FIX: Force diversity
+                focus_symbols = set(scanner_symbols)
+                focus_symbols |= set(baseline_symbols)  # Always include baseline
                 
-                logger.info(f"📊 Using scanner focus: {len(focus_symbols)} symbols")
+                # Add random control symbol to prevent scanner bias
+                all_symbols = config.symbols or []
+                if all_symbols:
+                    import random
+                    # Select a random symbol from all available that's not in scanner picks
+                    available_control = [s for s in all_symbols if s not in scanner_symbols]
+                    if available_control:
+                        control_symbol = random.choice(available_control)
+                        focus_symbols.add(control_symbol)
+                        logger.info(f"  Random control: {control_symbol} (prevents scanner bias)")
+                
+                focus_list = list(focus_symbols)
+                
+                logger.info(f"📊 Using scanner focus: {len(focus_list)} symbols")
                 logger.info(f"  Scanner picks: {scanner_symbols}")
                 logger.info(f"  Baseline: {baseline_symbols}")
+                logger.info(f"  Forced diversity: {len(focus_list)} total (prevents concentration bias)")
                 
-                return focus_symbols
+                return focus_list
                 
             except Exception as e:
                 logger.warning(f"⚠️ Scanner data load failed: {e}, using all symbols")
@@ -162,30 +179,34 @@ def initialize_signal_validator(config: AppConfig) -> Optional[SignalValidator]:
         return None
 
 
-def initialize_tiered_sizer(config: AppConfig, account_value: float) -> Optional[TieredPositionSizer]:
-    """
-    Initialize tiered position sizer if tiered allocation is enabled.
-    
-    Args:
-        config: Application configuration
-        account_value: Current account equity
-    
-    Returns:
-        TieredPositionSizer instance or None
-    """
-    if not config.enable_tiered_allocation:
-        logger.info("Tiered allocation disabled, skipping tiered sizer")
-        return None
-    
-    try:
-        sizer = TieredPositionSizer(
-            account_value=account_value,
-            use_fractional=config.enable_fractional_shares,
-            min_notional=config.min_order_notional,
-            enable_compression=True
-        )
-        logger.info("✅ Tiered position sizer initialized")
-        return sizer
-    except Exception as e:
-        logger.error(f"Failed to initialize tiered sizer: {e}")
-        return None
+def initialize_tiered_sizer(config: AppConfig, account_value: Optional[float] = None) -> Optional[TieredPositionSizer]:
+        """
+        Initialize tiered position sizer if tiered allocation is enabled.
+        
+        Note: account_value is optional and stored for backward compatibility only.
+        ALWAYS pass account_value to calculate_shares() for live equity (Problem 3 Fix).
+        
+        Args:
+            config: Application configuration
+            account_value: Optional initial account equity (deprecated - pass per call)
+        
+        Returns:
+            TieredPositionSizer instance or None
+        """
+        if not config.enable_tiered_allocation:
+            logger.info("Tiered allocation disabled, skipping tiered sizer")
+            return None
+        
+        try:
+            # account_value parameter is optional now - always pass to calculate_shares()
+            sizer = TieredPositionSizer(
+                account_value=account_value,  # Optional, for backward compatibility
+                use_fractional=config.enable_fractional_shares,
+                min_notional=config.min_order_notional,
+                enable_compression=True
+            )
+            logger.info("✅ Tiered position sizer initialized (will use live account_value per call)")
+            return sizer
+        except Exception as e:
+            logger.error(f"Failed to initialize tiered sizer: {e}")
+            return None

@@ -503,16 +503,24 @@ class AsyncTradingSystemOrchestrator:
                                 except:
                                     pass
                             
-                            approved_tier, tier_reason = self.tier_tracker.check_tier_capacity(
-                                tier,
-                                proposed_value,
-                                tier_exposures[tier],
-                                account_value
+                            # ATOMIC: Reserve exposure (Problem 2 Fix)
+                            approved_tier, tier_reason = self.tier_tracker.reserve_exposure(
+                                tier=tier,
+                                proposed_value=proposed_value,
+                                current_tier_exposure=tier_exposures[tier],
+                                account_value=account_value,
+                                symbol=signal.symbol
                             )
                             
                             if not approved_tier:
                                 logger.warning(
-                                    f"🚫 SKIPPING BUY order for {signal.symbol}: Tier exposure check failed - {tier_reason}"
+                                    f"🚫 SKIPPING BUY order for {signal.symbol}: Tier exposure check failed - {tier_reason}",
+                                    extra={
+                                        "symbol": signal.symbol,
+                                        "reason": "tier_exposure",
+                                        "tier": tier,
+                                        "tier_reason": tier_reason
+                                    }
                                 )
                                 execution_results.append(ExecutionResult(
                                     signal=signal,
@@ -569,10 +577,12 @@ class AsyncTradingSystemOrchestrator:
                                         current_price = market_data_dict[signal.symbol].bars[-1].close
                                 
                                 if current_price:
+                                    # ALWAYS pass live account_value (Problem 3 Fix)
                                     shares, meta = self.tiered_sizer.calculate_shares(
                                         signal.symbol,
                                         current_price,
-                                        tier
+                                        tier,
+                                        account_value=account_value  # Live equity, not cached
                                     )
                                     
                                     if shares and shares > 0:
@@ -584,8 +594,19 @@ class AsyncTradingSystemOrchestrator:
                                         )
                                     else:
                                         logger.warning(
-                                            f"🚫 SKIPPING BUY order for {signal.symbol}: Position sizing failed - {meta.get('reason', 'Unknown')}"
+                                            f"🚫 SKIPPING BUY order for {signal.symbol}: Position sizing failed - {meta.get('reason', 'Unknown')}",
+                                            extra={
+                                                "symbol": signal.symbol,
+                                                "reason": "position_sizing",
+                                                "tier": tier,
+                                                "sizing_reason": meta.get('reason')
+                                            }
                                         )
+                                        # Release reserved exposure on failure (Problem 2 Fix)
+                                        if self.tier_tracker:
+                                            tier_for_release = self.tier_tracker.get_tier_for_symbol(signal.symbol)
+                                            if tier_for_release:
+                                                self.tier_tracker.release_exposure(tier_for_release, proposed_value, signal.symbol)
                                         execution_results.append(ExecutionResult(
                                             signal=signal,
                                             executed=False,
@@ -700,9 +721,26 @@ class AsyncTradingSystemOrchestrator:
                     
                 except Exception as e:
                     error_str = str(e)
-                    logger.exception(f"Execution failed for {signal.symbol}: {e}")
+                    logger.exception(
+                        f"Execution failed for {signal.symbol}: {e}",
+                        extra={
+                            "symbol": signal.symbol,
+                            "reason": "execution_error",
+                            "error": str(e),
+                            "action": signal.action.value
+                        }
+                    )
                     executed = False
                     error = error_str
+                    
+                    # Release reserved exposure on execution failure (Problem 2 Fix)
+                    if signal.action == SignalAction.BUY and self.tier_tracker:
+                        tier_for_release = self.tier_tracker.get_tier_for_symbol(signal.symbol)
+                        if tier_for_release:
+                            proposed_value = (signal.qty or 0) * (signal.price or 0)
+                            if proposed_value > 0:
+                                self.tier_tracker.release_exposure(tier_for_release, proposed_value, signal.symbol)
+                                logger.info(f"🔓 Released reserved exposure for {signal.symbol} after execution failure")
                 
                 # Create ExecutionResult regardless of success/failure
                 # This ensures all trades are logged to DB

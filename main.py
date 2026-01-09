@@ -57,6 +57,28 @@ def main() -> None:
         # Check if async mode is enabled (default to true now)
         use_async = os.getenv("USE_ASYNC_ORCHESTRATOR", "true").lower() == "true"
         
+        # PROBLEM 6 FIX: Validate fractional shares support at startup
+        if config.enable_fractional_shares:
+            from agents.execution_agent import ExecutionAgent
+            logger.info("Validating fractional shares support...")
+            try:
+                execution_agent = ExecutionAgent(config=config)
+                if not execution_agent.validate_fractional_support():
+                    raise RuntimeError(
+                        "Fractional shares enabled in config but broker does not support them. "
+                        "Set ENABLE_FRACTIONAL_SHARES=false or enable fractional trading in your broker account."
+                    )
+                logger.info("✅ Fractional shares validated and supported")
+            except Exception as e:
+                logger.error(f"Fractional shares validation failed: {e}")
+                if config.trading_mode.value == "live":
+                    raise RuntimeError(
+                        "CRITICAL: Cannot start live trading without fractional shares validation. "
+                        "Fix the issue or disable fractional shares."
+                    ) from e
+                else:
+                    logger.warning("Continuing in paper mode despite validation failure...")
+        
         if use_async:
             logger.info("Using async event-driven orchestrator (default)")
             orchestrator = AsyncTradingSystemOrchestrator(config=config)

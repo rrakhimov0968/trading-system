@@ -279,6 +279,8 @@ class AppConfig:
             tier1_allocation=float(os.getenv("TIER1_ALLOCATION", "0.40")),
             tier2_allocation=float(os.getenv("TIER2_ALLOCATION", "0.30")),
             tier3_allocation=float(os.getenv("TIER3_ALLOCATION", "0.30")),
+            # Validate tier allocations sum to 1.0 (CRITICAL: Fail fast if invalid)
+            # This is done after all allocations are set
             # Fractional shares
             enable_fractional_shares=os.getenv("ENABLE_FRACTIONAL_SHARES", "true").lower() == "true",
             min_order_notional=float(os.getenv("MIN_ORDER_NOTIONAL", "10.0")),
@@ -289,6 +291,60 @@ class AppConfig:
             max_signal_age_hours=float(os.getenv("MAX_SIGNAL_AGE_HOURS", "24")),
             baseline_symbols=[s.strip() for s in os.getenv("BASELINE_SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
         )
+        
+        # CRITICAL: Validate tier allocations sum to 1.0 (Problem 4 Fix)
+        config_obj = cls(
+            trading_mode=trading_mode,
+            log_level=log_level,
+            alpaca=AlpacaConfig.from_env(),
+            openai=LLMConfig.openai_from_env(),
+            anthropic=LLMConfig.anthropic_from_env(),
+            groq=LLMConfig.groq_from_env(),
+            database=DatabaseConfig.from_env(),
+            data_provider=data_provider,
+            loop_interval_seconds=int(os.getenv("LOOP_INTERVAL_SECONDS", "60")),
+            symbols=symbols,
+            quant_min_sharpe=float(os.getenv("QUANT_MIN_SHARPE", "0.8")),
+            quant_max_drawdown=float(os.getenv("QUANT_MAX_DRAWDOWN", "0.15")),
+            quant_max_vif=float(os.getenv("QUANT_MAX_VIF", "10.0")),
+            quant_use_llm=os.getenv("QUANT_USE_LLM", "false").lower() == "true",
+            risk_max_per_trade=float(os.getenv("RISK_MAX_PER_TRADE", "0.02")),
+            risk_max_daily_loss=float(os.getenv("RISK_MAX_DAILY_LOSS", "0.05")),
+            risk_min_confidence=float(os.getenv("RISK_MIN_CONFIDENCE", "0.3")),
+            risk_max_qty=int(os.getenv("RISK_MAX_QTY", "1000")),
+            risk_default_account_balance=float(os.getenv("RISK_DEFAULT_ACCOUNT_BALANCE", "10000.0")),
+            risk_use_llm_advisor=os.getenv("RISK_USE_LLM_ADVISOR", "false").lower() == "true",
+            # Tiered allocation
+            enable_tiered_allocation=os.getenv("ENABLE_TIERED_ALLOCATION", "false").lower() == "true",
+            tier1_allocation=float(os.getenv("TIER1_ALLOCATION", "0.40")),
+            tier2_allocation=float(os.getenv("TIER2_ALLOCATION", "0.30")),
+            tier3_allocation=float(os.getenv("TIER3_ALLOCATION", "0.30")),
+            # Fractional shares
+            enable_fractional_shares=os.getenv("ENABLE_FRACTIONAL_SHARES", "true").lower() == "true",
+            min_order_notional=float(os.getenv("MIN_ORDER_NOTIONAL", "10.0")),
+            # Scanner integration
+            use_scanner=os.getenv("USE_SCANNER", "false").lower() == "true",
+            scanner_file=os.getenv("SCANNER_FILE", "candidates.json"),
+            max_gap_pct=float(os.getenv("MAX_GAP_PCT", "0.02")),
+            max_signal_age_hours=float(os.getenv("MAX_SIGNAL_AGE_HOURS", "24")),
+            baseline_symbols=[s.strip() for s in os.getenv("BASELINE_SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
+        )
+        
+        # CRITICAL: Validate tier allocations sum to 1.0 (Problem 4 Fix)
+        if config_obj.enable_tiered_allocation:
+            total_allocation = (
+                config_obj.tier1_allocation +
+                config_obj.tier2_allocation +
+                config_obj.tier3_allocation
+            )
+            if abs(total_allocation - 1.0) > 1e-6:  # Strict tolerance (1e-6 = 0.0001%)
+                raise ValueError(
+                    f"Tier allocations must sum to 1.0, got {total_allocation:.6f}. "
+                    f"TIER1={config_obj.tier1_allocation}, TIER2={config_obj.tier2_allocation}, "
+                    f"TIER3={config_obj.tier3_allocation}"
+                )
+        
+        return config_obj
 
 
 # Global config instance (lazy-loaded)
