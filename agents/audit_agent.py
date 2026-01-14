@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import json
+import uuid
 
 from agents.base import BaseAgent
 from models.signal import TradingSignal
@@ -148,6 +149,36 @@ class AuditAgent(BaseAgent):
                 metrics={}
             )
     
+    def _safe_json_dumps(self, obj: Any, indent: int = 2) -> str:
+        """
+        Safely serialize object to JSON, handling UUIDs, datetime, and other non-serializable types.
+        
+        Args:
+            obj: Object to serialize
+            indent: JSON indentation level
+            
+        Returns:
+            JSON string representation
+        """
+        def json_serializer(obj):
+            """Custom JSON serializer for non-serializable types."""
+            # Handle UUID objects
+            if isinstance(obj, uuid.UUID):
+                return str(obj)
+            # Handle datetime objects
+            if isinstance(obj, (datetime, timedelta)):
+                return str(obj)
+            # Handle any object with __dict__
+            if hasattr(obj, '__dict__'):
+                return str(obj)
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+        
+        try:
+            return json.dumps(obj, indent=indent, default=json_serializer)
+        except (TypeError, ValueError) as e:
+            self.log_warning(f"JSON serialization failed, using fallback: {e}")
+            return str(obj)
+    
     def _generate_narrative(
         self,
         iteration_summary: IterationSummary,
@@ -175,11 +206,13 @@ class AuditAgent(BaseAgent):
         execution_summary = []
         if execution_results:
             for result in execution_results:
+                # Convert order_id to string if it's a UUID or other non-serializable type
+                order_id = str(result.order_id) if result.order_id is not None else None
                 execution_summary.append({
                     "symbol": result.signal.symbol,
                     "action": result.signal.action.value,
                     "executed": result.executed,
-                    "order_id": result.order_id,
+                    "order_id": order_id,
                     "error": result.error
                 })
         
@@ -194,7 +227,7 @@ Trading Activity Summary:
 - Duration: {iteration_summary.duration_seconds:.2f} seconds
 
 Execution Results:
-{json.dumps(execution_summary, indent=2) if execution_summary else "No executions"}
+{self._safe_json_dumps(execution_summary) if execution_summary else "No executions"}
 
 Errors:
 {chr(10).join(iteration_summary.errors) if iteration_summary.errors else "No errors"}
