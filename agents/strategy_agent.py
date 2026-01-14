@@ -5,6 +5,11 @@ from typing import Dict, List, Optional, Any
 import numpy as np
 import pandas as pd
 from groq import Groq
+try:
+    from groq import RateLimitError as GroqRateLimitError
+except ImportError:
+    # Fallback if RateLimitError is not directly importable
+    GroqRateLimitError = None
 
 from agents.base import BaseAgent
 from models.market_data import MarketData
@@ -252,7 +257,6 @@ class StrategyAgent(BaseAgent):
                 "reasoning": f"Neutral market conditions - mean reversion hold (volatility={volatility:.2%}, trend_change={trend_direction:.2%})"
             }
     
-    @retry_with_backoff(config=RetryConfig(max_attempts=3, initial_delay=1.0))
     def _select_strategy_with_llm(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Use LLM to interpret market context and select appropriate strategy.
@@ -390,6 +394,30 @@ IMPORTANT:
                 "reasoning": f"LLM validation failed - strategy not in allowed list. Using safe default."
             }
         except Exception as e:
+            # Check if this is a rate limit error
+            is_rate_limit = False
+            rate_limit_message = None
+            
+            # Check for Groq RateLimitError
+            if GroqRateLimitError and isinstance(e, GroqRateLimitError):
+                is_rate_limit = True
+                rate_limit_message = str(e)
+            elif hasattr(e, 'status_code') and e.status_code == 429:
+                is_rate_limit = True
+                rate_limit_message = "Rate limit exceeded (429)"
+            elif 'rate limit' in str(e).lower() or '429' in str(e) or 'RateLimitError' in str(type(e).__name__):
+                is_rate_limit = True
+                rate_limit_message = str(e)
+            
+            if is_rate_limit:
+                self.log_warning(
+                    f"Groq API rate limit reached for {symbol}. "
+                    f"Using deterministic fallback. Error: {rate_limit_message}"
+                )
+                # Don't retry on rate limit - immediately fallback
+                return self._deterministic_fallback(symbol, context)
+            
+            # For other exceptions, log and fallback
             self.log_exception(f"LLM strategy selection failed for {symbol}", e)
             # Smart fallback based on actual market conditions
             return self._deterministic_fallback(symbol, context)
