@@ -237,6 +237,9 @@ class RiskAgent(BaseAgent):
                 details={"confidence": signal.confidence, "min_confidence": self.min_confidence}
             )
         
+        # Calculate max_risk_absolute before if/else (used in validation after)
+        max_risk_absolute = self.max_risk_per_trade * self._account_balance
+        
         if use_equal_weight:
             # EQUAL WEIGHT POSITION SIZING (recommended)
             # This matches what backtesting typically assumes
@@ -333,8 +336,7 @@ class RiskAgent(BaseAgent):
             # Higher confidence = larger position, but still capped at max_risk_per_trade
             risk_amount = self.max_risk_per_trade * self._account_balance * signal.confidence
             
-            # Ensure risk doesn't exceed absolute maximum
-            max_risk_absolute = self.max_risk_per_trade * self._account_balance
+            # Ensure risk doesn't exceed absolute maximum (max_risk_absolute already defined above)
             risk_amount = min(risk_amount, max_risk_absolute)
             
             # Calculate quantity: risk_amount / stop_distance_per_share
