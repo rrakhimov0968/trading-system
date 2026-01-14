@@ -12,7 +12,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from models.signal import SignalAction, TradingSignal
 from models.audit import ExecutionResult, IterationSummary, AuditReport
@@ -323,35 +323,66 @@ class DatabaseManager:
                 drawdown = getattr(signal, 'drawdown', None)
                 expectancy = getattr(signal, 'expectancy', None)
                 
-                trade = TradeHistory(
-                    id=correlation_id,
-                    symbol=signal.symbol,
-                    action=signal.action,
-                    strategy_name=signal.strategy_name,
-                    qty=signal.qty,
-                    price=signal.price,
-                    fill_price=fill_price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
-                    risk_amount=signal.risk_amount,
-                    confidence=signal.confidence,
-                    timestamp=signal.timestamp,
-                    execution_time=execution_time,
-                    order_id=order_id,
-                    executed=executed,
-                    error=error,
-                    sharpe=sharpe,
-                    drawdown=drawdown,
-                    expectancy=expectancy,
-                    reasoning=signal.reasoning,
-                    correlation_id=correlation_id
-                )
+                # Check if trade with this ID already exists (upsert logic)
+                existing_trade = session.query(TradeHistory).filter_by(id=correlation_id).first()
                 
-                session.add(trade)
-                logger.debug(f"Logged trade for {signal.symbol} with correlation_id {correlation_id}")
+                if existing_trade:
+                    # Update existing trade
+                    existing_trade.symbol = signal.symbol
+                    existing_trade.action = signal.action
+                    existing_trade.strategy_name = signal.strategy_name
+                    existing_trade.qty = signal.qty
+                    existing_trade.price = signal.price
+                    existing_trade.fill_price = fill_price
+                    existing_trade.stop_loss = signal.stop_loss
+                    existing_trade.take_profit = signal.take_profit
+                    existing_trade.risk_amount = signal.risk_amount
+                    existing_trade.confidence = signal.confidence
+                    existing_trade.timestamp = signal.timestamp
+                    existing_trade.execution_time = execution_time
+                    existing_trade.order_id = order_id
+                    existing_trade.executed = executed
+                    existing_trade.error = error
+                    existing_trade.sharpe = sharpe
+                    existing_trade.drawdown = drawdown
+                    existing_trade.expectancy = expectancy
+                    existing_trade.reasoning = signal.reasoning
+                    existing_trade.correlation_id = correlation_id
+                    logger.debug(f"Updated existing trade for {signal.symbol} with correlation_id {correlation_id}")
+                else:
+                    # Insert new trade
+                    trade = TradeHistory(
+                        id=correlation_id,
+                        symbol=signal.symbol,
+                        action=signal.action,
+                        strategy_name=signal.strategy_name,
+                        qty=signal.qty,
+                        price=signal.price,
+                        fill_price=fill_price,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        risk_amount=signal.risk_amount,
+                        confidence=signal.confidence,
+                        timestamp=signal.timestamp,
+                        execution_time=execution_time,
+                        order_id=order_id,
+                        executed=executed,
+                        error=error,
+                        sharpe=sharpe,
+                        drawdown=drawdown,
+                        expectancy=expectancy,
+                        reasoning=signal.reasoning,
+                        correlation_id=correlation_id
+                    )
+                    session.add(trade)
+                    logger.debug(f"Logged trade for {signal.symbol} with correlation_id {correlation_id}")
             
             return correlation_id
             
+        except IntegrityError as e:
+            # Handle race condition where another process inserted the same trade
+            logger.warning(f"Trade with correlation_id {correlation_id} already exists, skipping duplicate insert")
+            return correlation_id
         except Exception as e:
             logger.exception(f"Failed to log trade: {e}")
             raise
